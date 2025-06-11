@@ -134,3 +134,26 @@ def covariance_lognormal_transform(covariance_lognormal: np.ndarray,
     precision_normal = np.linalg.inv(covariance_normal)
     
     return covariance_normal, precision_normal
+
+
+def update_log_normal_prior(prior):
+    if prior["pdf"].lower() == "lognormal":
+        if "stdev" in prior:
+            stdev = float(prior["stdev"])
+            if "mean" in prior:
+                mean = float(prior["mean"])
+                mu, sigma = lognormal_mean_stdev(mean, stdev)
+                del prior["mean"]
+            elif "mode" in prior:
+                mode = float(prior["mode"])
+                mu, sigma = lognormal_mode_stdev(mode, stdev)
+                del prior["mode"]
+            else:
+                raise ValueError("prior['stdev'] must be coupled with prior['mean'] or prior['mode']")
+            del prior["stdev"]
+            prior["mu"] = mu
+            prior["sigma"] = sigma
+        elif "mu" and "sigma" in prior: 
+            pass
+        else:
+            raise ValueError("Incompatible combination of prior parameters.") 
