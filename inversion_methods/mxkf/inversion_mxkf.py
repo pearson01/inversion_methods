@@ -95,7 +95,7 @@ def mxkf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
 
 
 
-def MX_Kalman_Filter(config: InversionIntermediate):
+def mx_kalmanfilter(config: InversionIntermediate):
 
     if config.use_bc is True:
         nparam = config.nbasis + 4

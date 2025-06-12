@@ -3,7 +3,7 @@ import time
 from dataclasses import dataclass
 
 from inversion_methods.mxkf import DataConfig, InversionInput, InversionIntermediate, PostProcessInput
-from inversion_methods.mxkf import mxkf_monthly_dictionaries, MX_Kalman_Filter, mxkf_postprocessouts, extract_data
+from inversion_methods.mxkf import mxkf_monthly_dictionaries, mx_kalmanfilter, mxkf_postprocessouts, extract_data
 
 
 @dataclass
@@ -142,7 +142,7 @@ def mxkf_function(config: InversionParameters):
     xouts_95, 
     Ymod_dic,
     nparam,
-    ) = MX_Kalman_Filter(inversion_intermediate)
+    ) = mx_kalmanfilter(inversion_intermediate)
     
     end_kalman = time.time()
 
