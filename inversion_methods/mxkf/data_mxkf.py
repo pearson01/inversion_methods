@@ -2,7 +2,8 @@ import numpy as np
 import openghg_inversions.hbmcmc.inversionsetup as setup
 from openghg_inversions.basis import basis_functions_wrapper
 from openghg_inversions.inversion_data import data_processing_surface_notracer
-from inversion_methods.manipulation import update_log_normal_prior, covariance_lognormal_transform, spatial_covariance
+from inversion_methods.manipulation.lognormal_transformations import update_log_normal_prior, covariance_lognormal_transform
+from inversion_methods.manipulation.covariance import spatial_covariance
 from dataclasses import dataclass
 
 
@@ -15,6 +16,14 @@ class DataConfig:
     start_date: str
     end_date: str
     obs_data_level: str
+    bc_store: str
+    obs_store: str
+    footprint_store: str
+    emissions_store: str
+    outputname: str
+    nbasis: int
+    xprior: dict
+    bcprior: dict
     platform: list[str | None] | str | None = None
     met_model: list | None = None
     fp_model: str | None = None
@@ -26,25 +35,17 @@ class DataConfig:
     calibration_scale: str | None = None
     use_bc: bool = True
     bc_input: str | None = None
-    bc_store: str
-    obs_store: str
-    footprint_store: str
-    emissions_store: str
     averaging_error: bool = True
     save_merged_data: bool = False
     merged_data_dir: str | None = None
     merged_data_name: str | None = None
-    outputname: str
     basis_algorithm: str = "weighted"
-    nbasis: int
     fp_basis_case: str | None = None
     bc_basis_case: str = "NESW"
     basis_directory: str | None = None
     bc_basis_directory: str | None = None
     fix_basis_outer_regions: bool = False
     basis_output_path: str | None = None
-    xprior: dict
-    bcprior: dict
     bc_freq: str | None = None
     spatial_decay: float | int | None = None
 
@@ -107,18 +108,22 @@ def build_obs_vectors(fp_data, sites):
     error = np.zeros(0)
     obs_repeatability = np.zeros(0)
     obs_variability = np.zeros(0)
-    Hx = np.zeros((0, fp_data[sites[0]].H.shape[1]))
     Y = np.zeros(0)
     siteindicator = np.zeros(0)
 
     for si, site in enumerate(sites):
-        drop_vars = [v for v in ["H", "H_bc", "mf", "mf_error", "mf_variability", "mf_repeatability"]
-                     if v in fp_data[site].data_vars]
+
+        drop_vars = []
+        for var in ["H", "H_bc", "mf", "mf_error", "mf_variability", "mf_repeatability"]:
+            if var in fp_data[site].data_vars:
+                drop_vars.append(var)
+
         fp_data[site] = fp_data[site].dropna("time", subset=drop_vars)
 
         error = np.concatenate((error, fp_data[site].mf_error.values))
         obs_repeatability = np.concatenate((obs_repeatability, fp_data[site].mf_repeatability.values))
         obs_variability = np.concatenate((obs_variability, fp_data[site].mf_variability.values))
+        
         Y = np.concatenate((Y, fp_data[site].mf.values))
         siteindicator = np.concatenate((siteindicator, np.ones_like(fp_data[site].mf.values) * si))
 
@@ -127,7 +132,7 @@ def build_obs_vectors(fp_data, sites):
         else:
             Ytime = np.concatenate((Ytime, fp_data[site].time.values))
 
-        Hx = np.vstack((Hx, fp_data[site].H.values))
+        Hx = fp_data[site].H.values if si == 0 else np.hstack((Hx, fp_data[site].H.values))
 
     return Hx, Y, Ytime, error, siteindicator, obs_repeatability, obs_variability
 

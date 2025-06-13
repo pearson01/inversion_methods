@@ -6,7 +6,7 @@ import xarray as xr
 from pandas import date_range, to_datetime
 from dataclasses import dataclass
 
-from inversion_methods.manipulation import woodbury
+from inversion_methods.manipulation.matrix_identities import woodbury
 from openghg_inversions import utils, convert
 from openghg_inversions.hbmcmc.hbmcmc_output import define_output_filename
 
@@ -20,12 +20,12 @@ class InversionInput:
     Ytime: np.ndarray
     error: np.ndarray
     siteindicator: np.ndarray
-    use_bc: bool = False
-    Hbc: np.ndarray | None = None
     nbasis: int
     xprior: dict
     bcprior: dict
     x_covariance: np.ndarray
+    use_bc: bool = False
+    Hbc: np.ndarray | None = None
     bc_covariance: np.ndarray | None = None
 
 
@@ -33,14 +33,16 @@ class InversionInput:
 class InversionIntermediate:
     Y_dic: dict
     Yerr_dic: dict
+    Ytime_dic: dict
     H_dic: dict
-    Hbc_dic: dict | None = None
+    siteindicator_dic: dict
     nbasis: int
-    nperiod: int | None = None
-    use_bc: bool = False
     xprior: dict
     bcprior: dict
     x_covariance: np.ndarray
+    Hbc_dic: dict | None = None
+    nperiod: int | None = None
+    use_bc: bool = False
     bc_covariance: np.ndarray | None = None
 
 
@@ -79,17 +81,19 @@ def mxkf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
             Hbc_dic[period] = config.Hbc.T[mnthloc, bc_count:bc_count+4]
             bc_count += 4
 
-    return InversionIntermediate(Y_dic, 
-                                 Yerr_dic, 
-                                 H_dic, 
-                                 Hbc_dic, 
-                                 config.nbasis, 
-                                 nperiod, 
-                                 config.use_bc,
-                                 config.xprior,
-                                 config.bcprior,
-                                 config.x_covariance,
-                                 config.bc_covariance,
+    return InversionIntermediate(Y_dic=Y_dic, 
+                                 Yerr_dic=Yerr_dic,
+                                 Ytime_dic=Ytime_dic, 
+                                 H_dic=H_dic,
+                                 siteindicator_dic=siteindicator_dic,
+                                 Hbc_dic=Hbc_dic, 
+                                 nbasis=config.nbasis, 
+                                 nperiod=nperiod, 
+                                 use_bc=config.use_bc,
+                                 xprior=config.xprior,
+                                 bcprior=config.bcprior,
+                                 x_covariance=config.x_covariance,
+                                 bc_covariance=config.bc_covariance,
                                  )
 
 
@@ -108,7 +112,6 @@ def mx_kalmanfilter(config: InversionIntermediate):
         P_prior = config.x_covariance
 
     Ymod_dic = {}
-
     xprior_mu = config.xprior["mu"]
     xprior_ln_median = np.exp(xprior_mu)
 
@@ -214,7 +217,6 @@ class PostProcessInput:
     end_date: str
     outputname: str
     outputpath: str
-    country_unit_prefix: str | None
     emissions_name: str
     # bcouts,
     # bcouts_covariance: np.ndarray | None = None,
@@ -225,9 +227,10 @@ class PostProcessInput:
     # obs_variability: np.ndarray | None = None,
     fp_data: dict
     country_file: str
-    use_bc: bool = False
     nbasis: int
     nperiod: int
+    country_unit_prefix: str | None
+    use_bc: bool = False
 
 
 def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
