@@ -44,7 +44,7 @@ class InversionParameters:
     bc_basis_directory: str | None = None
     fix_basis_outer_regions: bool = False
     country_file: str
-    country_unit_prefix: str # "T"
+    country_unit_prefix: str = "T"
     basis_output_path: str | None = None
     xprior: dict
     bcprior: dict

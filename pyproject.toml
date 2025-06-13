@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openghg_inversions"
+version = "0.1.0"
+
+authors = [{name = "Stephen Pearson", email = "s.pearson@bristol.ac.uk"}]
+maintainers = [{name = "Stephen Pearson", email = "s.pearson@bristol.ac.uk"}]
+description = "Novel inverse methods for emissions estimation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pymc",
+    "numpyro",
+    "xarray", 
+    "pandas",
+    "matplotlib",
+    "scipy", 
+    "numpy",
+    "openghg",
+    "openghg_inversions"
+    "sparse"
+]
+
+[project.urls]
+"Home" = "https://github.com/pearson01/inversion_methods"
+"Bug Tracker" = "https://github.com/pearson01/inversion_methods/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
