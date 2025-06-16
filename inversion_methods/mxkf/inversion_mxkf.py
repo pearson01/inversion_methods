@@ -163,7 +163,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
 
         Pa = (np.eye(nparam) - K @ H_hat) @ Pf
 
-        print(f"{t} - Condition of R_inv: {round(np.linalg.cond(R_inv),2)}, H_hat: {round(np.linalg.cond(H_hat),2)}, Pf: {round(np.linalg.cond(Pa),2)}, Pf_inv + HR_invH.T: {round(np.linalg.cond(np.linalg.inv(Pf) +H_hat.T@R_inv@H_hat),2)}")
+        print(f"{t} - Condition of R_inv: {round(np.linalg.cond(R_inv),2)}, H_hat: {round(np.linalg.cond(H_hat),2)}, Pf: {round(np.linalg.cond(Pf),2)}, Pf_inv + H_hat.T @ R_inv @ H_hat: {round(np.linalg.cond(np.linalg.inv(Pf) + H_hat.T@R_inv@H_hat),2)}")
 
         # Pf = Pa + Q
         # xb = xa
