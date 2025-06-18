@@ -27,6 +27,7 @@ class InversionInput:
     use_bc: bool = False
     Hbc: np.ndarray | None = None
     bc_covariance: np.ndarray | None = None
+    fixed_model_error: float | int | None = None
 
 
 @dataclass
@@ -44,6 +45,7 @@ class InversionIntermediate:
     nperiod: int | None = None
     use_bc: bool = False
     bc_covariance: np.ndarray | None = None
+    fixed_model_error: float | int | None = None
 
 
 def mxkf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
@@ -94,6 +96,7 @@ def mxkf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
                                  bcprior=config.bcprior,
                                  x_covariance=config.x_covariance,
                                  bc_covariance=config.bc_covariance,
+                                 fixed_model_error=config.fixed_model_error
                                  )
 
 
@@ -142,17 +145,19 @@ def mx_kalmanfilter(config: InversionIntermediate):
             H = config.H_dic[t]
 
         Y = config.Y_dic[t]
-        Yerr = config.Yerr_dic[t]
+        if config.fixed_model_error is not None:
+            Yerr = config.Yerr_dic[t] + config.fixed_model_error
+        else:
+            Yerr = config.Yerr_dic[t]
         nm = len(Yerr)
-        R = np.diag(Yerr**2)
-        R_inv = np.diag(1/(Yerr**2))
+        R = np.diag((Yerr)**2)
+        R_inv = np.diag(1/((Yerr)**2))
 
         # Wb = np.diag(1/xb)
         Wb = np.diag(xb)
         Wo_inv = np.eye(nm)
         H_hat = Wo_inv @ H @ Wb
         
-
         if t == 0:
             Pf = P_prior + Q
 
@@ -231,6 +236,7 @@ class PostProcessInput:
     nperiod: int
     country_unit_prefix: str | None
     use_bc: bool = False
+    fixed_model_error: float | int | None = None
 
 
 def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
@@ -532,6 +538,7 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     #     outds.YmodBC.attrs["longname"] = "mean of posterior simulated boundary conditions"
     #     outds.bcsensitivity.attrs["longname"] = "boundary conditions sensitivity timeseries"
 
+    outds.attrs["Fixed model error"] = config.fixed_model_error
     outds.attrs["Start date"] = config.start_date
     outds.attrs["End date"] = config.end_date
 

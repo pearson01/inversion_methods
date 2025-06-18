@@ -37,6 +37,7 @@ class InversionParameters:
     use_bc: bool = True
     bc_input: str | None = None
     averaging_error: bool = True
+    fixed_model_error: float | int | None = None
     save_merged_data: bool = False
     merged_data_dir: str | None = None
     merged_data_name: str | None = None
@@ -53,7 +54,7 @@ class InversionParameters:
 
 
 def mxkf_function(config: InversionParameters):
-
+    
     start_data = time.time()
 
     data_config = DataConfig(species=config.species, 
@@ -127,7 +128,8 @@ def mxkf_function(config: InversionParameters):
                                      xprior=xprior,
                                      bcprior=bcprior,
                                      x_covariance=x_covariance,
-                                     bc_covariance=bc_covariance
+                                     bc_covariance=bc_covariance,
+                                     fixed_model_error = config.fixed_model_error
                                      )
 
     inversion_intermediate = mxkf_monthly_dictionaries(inversion_input)
@@ -181,7 +183,8 @@ def mxkf_function(config: InversionParameters):
                                           country_file=config.country_file,
                                           use_bc=config.use_bc,
                                           nbasis=nbasis,
-                                          nperiod=inversion_intermediate.nperiod
+                                          nperiod=inversion_intermediate.nperiod,
+                                          fixed_model_error=config.fixed_model_error
                                           )
 
     outsds = mxkf_postprocessouts(post_process_input)
