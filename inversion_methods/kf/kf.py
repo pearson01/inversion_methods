@@ -1,9 +1,8 @@
-
 import time
 from dataclasses import dataclass
 
-from inversion_methods.mxkf.data_mxkf import DataConfig, extract_data
-from inversion_methods.mxkf.inversion_mxkf import mxkf_monthly_dictionaries, mx_kalmanfilter, mxkf_postprocessouts, InversionInput, PostProcessInput
+from inversion_methods.kf.data_kf import DataConfig, extract_data
+from inversion_methods.kf.inversion_kf import kf_monthly_dictionaries, kalmanfilter, kf_postprocessouts, InversionInput, PostProcessInput
 
 
 @dataclass
@@ -53,7 +52,7 @@ class InversionParameters:
     spatial_decay: float | int | None = None
 
 
-def mxkf_function(config: InversionParameters):
+def kf_function(config: InversionParameters):
     
     start_data = time.time()
 
@@ -132,7 +131,7 @@ def mxkf_function(config: InversionParameters):
                                      fixed_model_error = config.fixed_model_error
                                      )
 
-    inversion_intermediate = mxkf_monthly_dictionaries(inversion_input)
+    inversion_intermediate = kf_monthly_dictionaries(inversion_input)
 
     end_data = time.time()
 
@@ -145,8 +144,8 @@ def mxkf_function(config: InversionParameters):
     xouts_95, 
     Ymod_dic,
     nparam,
-    fixed_model_error
-    ) = mx_kalmanfilter(inversion_intermediate)
+    fixed_model_error,
+    ) = kalmanfilter(inversion_intermediate)
     
     end_kalman = time.time()
 
@@ -188,7 +187,7 @@ def mxkf_function(config: InversionParameters):
                                           fixed_model_error=fixed_model_error
                                           )
 
-    outsds = mxkf_postprocessouts(post_process_input)
+    outsds = kf_postprocessouts(post_process_input)
 
     end_post = time.time()
 
