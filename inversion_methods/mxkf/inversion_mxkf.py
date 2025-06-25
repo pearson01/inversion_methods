@@ -131,8 +131,8 @@ def mx_kalmanfilter(config: InversionIntermediate):
     xouts_stdev = np.zeros((nparam, config.nperiod))
     xouts_mu = np.zeros((nparam, config.nperiod))
     xouts_sigma = np.zeros((nparam, config.nperiod))
-    xouts_mean_kalman = np.zeros((nparam, config.nperiod))
-    xouts_mode_kalman = np.zeros((nparam, config.nperiod))
+    xouts_mean = np.zeros((nparam, config.nperiod))
+    xouts_mode = np.zeros((nparam, config.nperiod))
     xouts_68 = np.zeros((nparam, 2, config.nperiod))
     xouts_95 = np.zeros((nparam, 2, config.nperiod))
 
@@ -185,7 +185,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
         xouts_sigma[:,t] = np.diag(Pa)**0.5
         xouts_mu[:,t] = xa_mu
         xouts_stdev[:,t] = ((np.exp(xouts_sigma[:,t]**2) - 1) * np.exp(2*xouts_mu[:,t] + xouts_sigma[:,t]**2))**0.5
-        xouts_mean_kalman[:,t] = np.exp(xouts_mu[:,t] + 0.5*xouts_sigma[:,t]**2)
+        xouts_mean[:,t] = np.exp(xouts_mu[:,t] + 0.5*xouts_sigma[:,t]**2)
         # for basis in np.arange(nparam):
             # xouts_68[basis, 0, t] = lognorm.ppf(0.16, xouts_sigma[basis, t], scale=np.exp(xouts_mu[basis, t]))
             # xouts_68[basis, 1, t] = lognorm.ppf(0.34, xouts_sigma[basis, t], scale=np.exp(xouts_mu[basis, t]))
@@ -198,16 +198,19 @@ def mx_kalmanfilter(config: InversionIntermediate):
         xouts_95[:, 1, t] = np.exp(xouts_mu[:,t] + 2*xouts_sigma[:,t])
         
 
-        xouts_mode_kalman[:,t] = np.exp(xouts_mu[:,t] - xouts_sigma[:,t]**2)
+        xouts_mode[:,t] = np.exp(xouts_mu[:,t] - xouts_sigma[:,t]**2)
 
-        Ymod_dic[t] = H @ xouts_mean_kalman[:,t]
+        Ymod_dic[t] = H @ xouts_mean[:,t]
 
-    return xouts_mean_kalman, xouts_68, xouts_95, Ymod_dic, nparam, config.fixed_model_error
+    return xouts_mean, xouts_median, xouts_mode, xouts_stdev, xouts_68, xouts_95, Ymod_dic, nparam, config.fixed_model_error
 
 
 @dataclass
 class PostProcessInput:
-    xouts: np.ndarray
+    xouts_mean: np.ndarray
+    xouts_mode :np.ndarray
+    xouts_median: np.ndarray
+    xouts_stdev: np.ndarray
     xouts_68: np.ndarray
     xouts_95: np.ndarray
     H_dic: dict
@@ -362,7 +365,7 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         scalemap_single = np.zeros_like(bfds.values)
 
         for basis in np.arange(config.nbasis):
-            scalemap_single[bfds.values == (basis + 1)] = config.xouts[basis, period]
+            scalemap_single[bfds.values == (basis + 1)] = config.xouts_mean[basis, period]
 
         scalemap.append(scalemap_single)
     
@@ -418,6 +421,8 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     unit_factor = convert.prefix(config.country_unit_prefix)
 
     cntrymean = np.zeros((len(cntrynames), config.nperiod))
+    cntrymedian = np.zeros((len(cntrynames), config.nperiod))
+    cntrymode = np.zeros((len(cntrynames), config.nperiod))
     # cntry68 = np.zeros((len(cntrynames), len(nui), nperiod))
     # cntry95 = np.zeros((len(cntrynames), len(nui), nperiod))
     # cntrysd = np.zeros((len(cntrynames), nperiod))
@@ -432,13 +437,25 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     for period in np.arange(config.nperiod):
 
         for ci, cntry in enumerate(cntrynames):
-            cntrytot = 0
+            cntrytotmean = 0
+            cntrytotmedian = 0
+            cntrytotmode = 0
             cntrytotprior = 0
             for bf in range(int(np.max(bfarray)) + 1):
                 bothinds = np.logical_and(cntrygrid == ci, bfarray == bf)
-                cntrytot += (
+                cntrytotmean += (
                     np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
-                    * config.xouts[bf, period]
+                    * config.xouts_mean[bf, period]
+                    / unit_factor
+                )
+                cntrytotmedian += (
+                    np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
+                    * config.xouts_median[bf, period]
+                    / unit_factor
+                )
+                cntrytotmode += (
+                    np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
+                    * config.xouts_mode[bf, period]
                     / unit_factor
                 )
                 cntrytotprior += (
@@ -446,7 +463,9 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
                     / unit_factor
                 )
             
-            cntrymean[ci, period] = cntrytot
+            cntrymean[ci, period] = cntrytotmean
+            cntrymedian[ci, period] = cntrytotmedian
+            cntrymode[ci, period] = cntrytotmode
             # cntrysd[ci, period] = np.std(cntrytottrace)
             # cntry68[ci, :, period] = pm.stats.hdi(cntrytottrace.values, 0.68)
             # cntry95[ci, :, period] = pm.stats.hdi(cntrytottrace.values, 0.95)
@@ -460,7 +479,10 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "Ytime": (["nmeasure"], Ytime),
         "Yapriori": (["nmeasure"], Yapriori),
         "Ymod": (["nmeasure"], Ymod),
-        "xouts": (["nparam", "period"], config.xouts),
+        "xouts_mean": (["nparam", "period"], config.xouts_mean),
+        "xouts_median": (["nparam", "period"], config.xouts_median),
+        "xouts_mode": (["nparam", "period"], config.xouts_mode),
+        "xouts_stdev": (["nparam", "period"], config.xouts_stdev),
         "xouts_68": (["nparam", "nUI", "period"], config.xouts_68),
         "xouts_95": (["nparam", "nUI", "period"], config.xouts_95),
         "siteindicator": (["nmeasure"], siteindicator),
@@ -474,6 +496,8 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "flux": (["lat", "lon", "period"], flux),
         "scaling": (["lat", "lon", "period"], scalemap),
         "countrymean": (["countrynames", "period"], cntrymean),
+        "countrymedian": (["countrynames", "period"], cntrymedian),
+        "countrymode": (["countrynames", "period"], cntrymode),
         "countryapriori": (["countrynames", "period"], cntryprior),
     }
 
@@ -510,6 +534,7 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     outds.Yapriori.attrs["units"] = obs_units + " " + "mol/mol"
     outds.Ymod.attrs["units"] = obs_units + " " + "mol/mol"
     outds.countrymean.attrs["units"] = country_units
+    outds.countrymedian.attrs["units"] = country_units
     outds.countryapriori.attrs["units"] = country_units
 
     outds.Yobs.attrs["longname"] = "observations"
@@ -522,10 +547,11 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     outds.sitelons.attrs["longname"] = "site longitudes corresponding to site names"
     outds.sitelats.attrs["longname"] = "site latitudes corresponding to site names"
     outds.fluxapriori.attrs["longname"] = "mean a priori flux over period"
-    outds.flux.attrs["longname"] = "posterior flux over period"
-    outds.scaling.attrs["longname"] = "scaling factor field over period"
+    outds.flux.attrs["longname"] = "Mean posterior flux over period"
+    outds.scaling.attrs["longname"] = f"Mean scaling factor field over period"
     outds.basisfunctions.attrs["longname"] = "basis function field"
     outds.countrymean.attrs["longname"] = "mean of ocean and country totals"
+    outds.countrymedian.attrs["longname"] = "median of ocean and country totals"
     outds.countryapriori.attrs["longname"] = "prior mean of ocean and country totals"
     outds.countrydefinition.attrs["longname"] = "grid definition of countries"
     outds.xsensitivity.attrs["longname"] = "emissions sensitivity timeseries"

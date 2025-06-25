@@ -140,13 +140,16 @@ def mxkf_function(config: InversionParameters):
 
     start_kalman = time.time()
 
-    (xouts, 
-    xouts_68, 
-    xouts_95, 
-    Ymod_dic,
-    nparam,
-    fixed_model_error
-    ) = mx_kalmanfilter(inversion_intermediate)
+    (xouts_mean,
+     xouts_median,
+     xouts_mode,
+     xouts_stdev, 
+     xouts_68, 
+     xouts_95, 
+     Ymod_dic,
+     nparam,
+     fixed_model_error
+     ) = mx_kalmanfilter(inversion_intermediate)
     
     end_kalman = time.time()
 
@@ -155,7 +158,10 @@ def mxkf_function(config: InversionParameters):
 
     start_post = time.time()
 
-    post_process_input = PostProcessInput(xouts=xouts,
+    post_process_input = PostProcessInput(xouts_mean=xouts_mean,
+                                          xouts_median=xouts_median,
+                                          xouts_mode=xouts_mode,
+                                          xouts_stdev=xouts_stdev,
                                           xouts_68=xouts_68,
                                           xouts_95=xouts_95,
                                           H_dic=inversion_intermediate.H_dic,
