@@ -3,7 +3,7 @@ import openghg_inversions.hbmcmc.inversionsetup as setup
 from openghg_inversions.basis import basis_functions_wrapper
 from openghg_inversions.inversion_data import data_processing_surface_notracer
 from inversion_methods.manipulation.covariance import spatial_covariance
-from inversion_methods.manipulation.lognormal_transformations import update_log_normal_prior, covariance_lognormal_transform
+from inversion_methods.manipulation.lognormal_transformations import covariance_lognormal_transform
 from dataclasses import dataclass
 
 
@@ -140,22 +140,21 @@ def build_obs_vectors(fp_data, sites):
 def build_boundary_conditions(fp_data, sites, config: DataConfig):
 
     if not config.use_bc:
-        return None, None, None
+        return None, None
 
-    Hbc = np.zeros((0, fp_data[sites[0]].H_bc.shape[1]))
+    else:
+        for si, site in enumerate(sites):
+            if config.bc_freq == "monthly":
+                Hmbc = setup.monthly_bcs(config.start_date, config.end_date, site, fp_data)
+            elif config.bc_freq is None:
+                Hmbc = fp_data[site].H_bc.values
+            else:
+                Hmbc = setup.create_bc_sensitivity(config.start_date, config.end_date, site, fp_data, config.bc_freq)
 
-    for si, site in enumerate(sites):
-        if config.bc_freq == "monthly":
-            Hmbc = setup.monthly_bcs(config.start_date, config.end_date, site, fp_data)
-        elif config.bc_freq is None:
-            Hmbc = fp_data[site].H_bc.values
-        else:
-            Hmbc = setup.create_bc_sensitivity(config.start_date, config.end_date, site, fp_data, config.bc_freq)
+            Hbc = Hmbc if si == 0 else np.hstack((Hbc, Hmbc))
 
-        Hbc = np.vstack((Hbc, Hmbc))
-
-    bc_covariance = np.eye(4) * config.bcprior["sigma"]**2
-    return Hbc, Hbc.shape[0], bc_covariance
+        bc_covariance = np.eye(4) * config.bcprior["sigma"]**2
+        return Hbc, bc_covariance
 
 
 def build_x_covariance(fp_data, nbasis, config: DataConfig):
@@ -196,8 +195,8 @@ def extract_data(config: DataConfig):
     gaussian_check(config.xprior)
     gaussian_check(config.bcprior)
 
-    Hbc, nbc, bc_cov = build_boundary_conditions(fp_data, config.sites, config)
+    Hbc, bc_cov = build_boundary_conditions(fp_data, config.sites, config)
     x_cov = build_x_covariance(fp_data, nbasis, config)
 
-    return Hx, Y, Ytime, error, siteindicator, nbasis, config.xprior, x_cov, bc_cov, config.bcprior, Hbc, nbc, bc_cov, fp_data
+    return Hx, Y, Ytime, error, siteindicator, nbasis, config.xprior, x_cov, bc_cov, config.bcprior, Hbc, fp_data
 

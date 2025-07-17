@@ -105,46 +105,99 @@ def mxkf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
 def mx_kalmanfilter(config: InversionIntermediate):
 
     if config.use_bc is True:
+        
+        bcouts_median = np.zeros((4, config.nperiod))
+        bcouts_stdev = np.zeros((4, config.nperiod))
+        bcouts_mu = np.zeros((4, config.nperiod))
+        bcouts_sigma = np.zeros((4, config.nperiod))
+        bcouts_mean = np.zeros((4, config.nperiod))
+        bcouts_mode = np.zeros((4, config.nperiod))
+        bcouts_68 = np.zeros((4, 2, config.nperiod))
+        bcouts_95 = np.zeros((4, 2, config.nperiod))
+        Ymodbc_dic = {}
+
         nparam = config.nbasis + 4
         P_prior = np.zeros((nparam, nparam))
-        P_prior[:config.nbasis, :config.basis] = config.x_covariance
+        P_prior[:config.nbasis, :config.nbasis] = config.x_covariance
         P_prior[config.nbasis:, config.nbasis:] = config.bc_covariance
+
+        if config.bcprior["pdf"] == "normal":         
+            bcprior_median = config.bcprior["mu"]
+        elif config.bcprior["pdf"] == "lognormal":
+            bcprior_median = np.exp(config.bcprior["mu"])
+        else:
+            raise ValueError(f"BC prior must be normal or lognormal for mxkf. {config.bcprior["pdf"]} invalid.")
+        
+        bcb = np.ones(4) * bcprior_median
+
+        print(f"Buidling mxkf with {config.bcprior["pdf"]} boundary condition uncertainties.")
 
     else:
         nparam = config.nbasis
         P_prior = config.x_covariance
+        bcprior_median = None
+        bcouts_median = None
+        bcouts_sigma = None
+        bcouts_mu = None
+        bcouts_stdev = None
+        bcouts_mean = None
+        bcouts_mode = None
+        bcouts_68 = None
+        bcouts_95 = None
+        bcb = None
+        Ymodbc_dic = None
 
     Ymod_dic = {}
-    xprior_mu = config.xprior["mu"]
-    xprior_ln_median = np.exp(xprior_mu)
 
-    bcprior_mu = config.bcprior["mu"]
-    bcprior_ln_median = np.exp(bcprior_mu)
+    if config.xprior["pdf"] == "normal":         
+        xprior_median = config.xprior["mu"]
+    elif config.xprior["pdf"] == "lognormal":
+        xprior_median = np.exp(config.xprior["mu"])
+    else:
+        raise ValueError(f"X prior must be normal or lognormal for mxkf. {config.xprior["pdf"]} invalid.")
 
-    xb = np.ones(config.nbasis) * xprior_ln_median
-    bcb = np.ones(4) * bcprior_ln_median
+    print(f"Buidling mxkf with {config.xprior["pdf"]} emissions uncertainties.")
+
+    xb = np.ones(config.nbasis) * xprior_median
+    xa = np.zeros(nparam)
 
     periods = np.arange(config.nperiod)
     Q = np.eye(nparam) * 0
 
-    xouts_median = np.zeros((nparam, config.nperiod))
-    xouts_stdev = np.zeros((nparam, config.nperiod))
-    xouts_mu = np.zeros((nparam, config.nperiod))
-    xouts_sigma = np.zeros((nparam, config.nperiod))
-    xouts_mean = np.zeros((nparam, config.nperiod))
-    xouts_mode = np.zeros((nparam, config.nperiod))
-    xouts_68 = np.zeros((nparam, 2, config.nperiod))
-    xouts_95 = np.zeros((nparam, 2, config.nperiod))
+    xouts_median = np.zeros((config.nbasis, config.nperiod))
+    xouts_stdev = np.zeros((config.nbasis, config.nperiod))
+    xouts_mu = np.zeros((config.nbasis, config.nperiod))
+    xouts_sigma = np.zeros((config.nbasis, config.nperiod))
+    xouts_mean = np.zeros((config.nbasis, config.nperiod))
+    xouts_mode = np.zeros((config.nbasis, config.nperiod))
+    xouts_68 = np.zeros((config.nbasis, 2, config.nperiod))
+    xouts_95 = np.zeros((config.nbasis, 2, config.nperiod))
 
     for t in periods:
+        
+        if config.xprior["pdf"] == "normal":
+            Wb_x = np.ones(config.nbasis)
+        elif config.xprior["pdf"] == "lognormal":
+            Wb_x = xb[:config.nbasis]
+
         if config.use_bc:
             H = np.hstack((config.H_dic[t], config.Hbc_dic[t]))
             if t == 0:
                 xb = np.append(xb, bcb)
+            
+            if config.bcprior["pdf"] == "normal":
+                Wb_bc = np.ones(4)
+            elif config.bcprior["pdf"] == "lognormal":
+                Wb_bc = xb[config.nbasis:]
+
+            Wb = np.diag(np.append(Wb_x, Wb_bc))
+
         else:
             H = config.H_dic[t]
+            Wb = np.diag(Wb_x)
 
         Y = config.Y_dic[t]
+
         if config.fixed_model_error is None:
             config.fixed_model_error = 0
 
@@ -154,8 +207,6 @@ def mx_kalmanfilter(config: InversionIntermediate):
         R = np.diag((Yerr)**2)
         R_inv = np.diag(1/((Yerr)**2))
 
-        # Wb = np.diag(1/xb)
-        Wb = np.diag(xb)
         Wo_inv = np.eye(nm)
         H_hat = Wo_inv @ H @ Wb
         
@@ -164,8 +215,34 @@ def mx_kalmanfilter(config: InversionIntermediate):
 
         K = Pf @ H_hat.T @ woodbury(R_inv, H_hat, Pf, H_hat.T)
         # K = Pf @ H_hat.T @ np.linalg.inv(H_hat @ Pf @ H_hat.T + R)
-        xa_mu = np.log(xb) + K @ (Y - H @ xb)
-        xa = np.exp(xa_mu)
+        
+        if config.xprior["pdf"] == "normal":
+            xb_step = xb[:config.nbasis]
+        elif config.xprior["pdf"] == "lognormal":
+            xb_step = np.log(xb[:config.nbasis])
+
+        if config.use_bc:
+            if config.bcprior["pdf"] == "normal":
+                bc_step = xb[config.nbasis:]
+            elif config.bcprior["pdf"] == "lognormal":
+                bc_step = np.log(xb[config.nbasis:])
+
+            xb_step = np.append(xb_step, bc_step)
+        
+        ## xb_step here represents the Gaussian converted xb vector. That is, the lognormal components of xb are converted to log space.
+
+        xa_mu = xb_step + K @ (Y - H @ xb)
+
+        if config.xprior["pdf"] == "normal":
+            xa[:config.nbasis] = xa_mu[:config.nbasis]
+        elif config.xprior["pdf"] == "lognormal":
+            xa[:config.nbasis] = np.exp(xa_mu[:config.nbasis])
+
+        if config.use_bc:
+            if config.bcprior["pdf"] == "normal":
+                xa[config.nbasis:] = xa_mu[config.nbasis:]
+            elif config.bcprior["pdf"] == "lognormal":
+                xa[config.nbasis:] = np.exp(xa_mu[config.nbasis:])
 
         Pa = (np.eye(nparam) - K @ H_hat) @ Pf
 
@@ -176,33 +253,76 @@ def mx_kalmanfilter(config: InversionIntermediate):
     
         Pf = P_prior + Q
 
+        xouts_median[:,t] = xa[:config.nbasis]
+        xouts_sigma[:,t] = np.diag(Pa)[:config.nbasis]**0.5
+        xouts_mu[:,t] = xa_mu[:config.nbasis]
+
+        if config.xprior["pdf"] == "normal":
+        
+            xouts_stdev[:,t] = xouts_sigma[:,t]
+            xouts_mean[:,t] = xouts_mu[:,t]
+            
+            xouts_68[:, 0, t] = xouts_mu[:,t] - xouts_sigma[:,t]
+            xouts_68[:, 1, t] = xouts_mu[:,t] + xouts_sigma[:,t]
+
+            xouts_95[:, 0, t] = xouts_mu[:,t] - 2*xouts_sigma[:,t]
+            xouts_95[:, 1, t] = xouts_mu[:,t] + 2*xouts_sigma[:,t]
+            
+            xouts_mode[:,t] = xouts_mu[:,t]
+
+        elif config.xprior["pdf"] == "lognormal":
+
+            xouts_stdev[:,t] = ((np.exp(xouts_sigma[:,t]**2) - 1) * np.exp(2*xouts_mu[:,t] + xouts_sigma[:,t]**2))**0.5
+            xouts_mean[:,t] = np.exp(xouts_mu[:,t] + 0.5*xouts_sigma[:,t]**2)
+            
+            xouts_68[:, 0, t] = np.exp(xouts_mu[:,t] - xouts_sigma[:,t])
+            xouts_68[:, 1, t] = np.exp(xouts_mu[:,t] + xouts_sigma[:,t])
+
+            xouts_95[:, 0, t] = np.exp(xouts_mu[:,t] - 2*xouts_sigma[:,t])
+            xouts_95[:, 1, t] = np.exp(xouts_mu[:,t] + 2*xouts_sigma[:,t])
+            
+            xouts_mode[:,t] = np.exp(xouts_mu[:,t] - xouts_sigma[:,t]**2)
+
         if config.use_bc:
-            xb = np.append(np.ones(config.nbasis)*xprior_ln_median, np.ones(4)*bcprior_ln_median)
+            
+            bcouts_median[:,t] = xa[config.nbasis:]
+            bcouts_sigma[:,t] = np.diag(Pa)[config.nbasis:]**0.5
+            bcouts_mu[:,t] = xa_mu[config.nbasis:]
+
+            if config.xprior["pdf"] == "normal":
+                
+                bcouts_stdev[:,t] = bcouts_sigma[:,t]
+                bcouts_mean[:,t] = bcouts_mu[:,t]
+                
+                bcouts_68[:, 0, t] = bcouts_mu[:,t] - bcouts_sigma[:,t]
+                bcouts_68[:, 1, t] = bcouts_mu[:,t] + bcouts_sigma[:,t]
+
+                bcouts_95[:, 0, t] = bcouts_mu[:,t] - 2*bcouts_sigma[:,t]
+                bcouts_95[:, 1, t] = bcouts_mu[:,t] + 2*bcouts_sigma[:,t]
+                
+                bcouts_mode[:,t] = bcouts_mu[:,t]
+
+            elif config.xprior["pdf"] == "lognormal":
+
+                bcouts_stdev[:,t] = ((np.exp(bcouts_sigma[:,t]**2) - 1) * np.exp(2*bcouts_mu[:,t] + bcouts_sigma[:,t]**2))**0.5
+                bcouts_mean[:,t] = np.exp(bcouts_mu[:,t] + 0.5*bcouts_sigma[:,t]**2)
+                
+                bcouts_68[:, 0, t] = np.exp(bcouts_mu[:,t] - bcouts_sigma[:,t])
+                bcouts_68[:, 1, t] = np.exp(bcouts_mu[:,t] + bcouts_sigma[:,t])
+
+                bcouts_95[:, 0, t] = np.exp(bcouts_mu[:,t] - 2*bcouts_sigma[:,t])
+                bcouts_95[:, 1, t] = np.exp(bcouts_mu[:,t] + 2*bcouts_sigma[:,t])
+                
+                bcouts_mode[:,t] = np.exp(bcouts_mu[:,t] - bcouts_sigma[:,t]**2)
+
+            Ymod_dic[t] = H @ np.append(xouts_mode[:,t], bcouts_mode[:,t])
+            Ymodbc_dic[t] = config.Hbc_dic[t] @ bcouts_mode[:,t]
+
         else:
-            xb = np.ones(config.nbasis)*xprior_ln_median
-    
-        xouts_median[:,t] = xa
-        xouts_sigma[:,t] = np.diag(Pa)**0.5
-        xouts_mu[:,t] = xa_mu
-        xouts_stdev[:,t] = ((np.exp(xouts_sigma[:,t]**2) - 1) * np.exp(2*xouts_mu[:,t] + xouts_sigma[:,t]**2))**0.5
-        xouts_mean[:,t] = np.exp(xouts_mu[:,t] + 0.5*xouts_sigma[:,t]**2)
-        # for basis in np.arange(nparam):
-            # xouts_68[basis, 0, t] = lognorm.ppf(0.16, xouts_sigma[basis, t], scale=np.exp(xouts_mu[basis, t]))
-            # xouts_68[basis, 1, t] = lognorm.ppf(0.34, xouts_sigma[basis, t], scale=np.exp(xouts_mu[basis, t]))
-        
-        
-        xouts_68[:, 0, t] = np.exp(xouts_mu[:,t] - xouts_sigma[:,t])
-        xouts_68[:, 1, t] = np.exp(xouts_mu[:,t] + xouts_sigma[:,t])
 
-        xouts_95[:, 0, t] = np.exp(xouts_mu[:,t] - 2*xouts_sigma[:,t])
-        xouts_95[:, 1, t] = np.exp(xouts_mu[:,t] + 2*xouts_sigma[:,t])
-        
+            Ymod_dic[t] = H @ xouts_mode[:,t]
 
-        xouts_mode[:,t] = np.exp(xouts_mu[:,t] - xouts_sigma[:,t]**2)
-
-        Ymod_dic[t] = H @ xouts_mean[:,t]
-
-    return xouts_mean, xouts_median, xouts_mode, xouts_stdev, xouts_68, xouts_95, Ymod_dic, nparam, config.fixed_model_error
+    return xouts_mean, xouts_median, xouts_mode, xouts_stdev, xouts_mu, xouts_sigma, xouts_68, xouts_95, bcouts_mean, bcouts_median, bcouts_mode, bcouts_stdev, bcouts_mu, bcouts_sigma, bcouts_68, bcouts_95, Ymod_dic, Ymodbc_dic, nparam, config.fixed_model_error
 
 
 @dataclass
@@ -211,9 +331,11 @@ class PostProcessInput:
     xouts_mode :np.ndarray
     xouts_median: np.ndarray
     xouts_stdev: np.ndarray
+    xouts_mu: np.ndarray
+    xouts_sigma: np.ndarray
     xouts_68: np.ndarray
     xouts_95: np.ndarray
-    H_dic: dict
+    Hx_dic: dict
     Y_dic: dict
     Ymod_dic: dict
     Yerr_dic: dict
@@ -227,18 +349,23 @@ class PostProcessInput:
     outputname: str
     outputpath: str
     emissions_name: str
-    # bcouts,
-    # bcouts_covariance: np.ndarray | None = None,
-    # YBC_mod: np.ndarray | None = None,
-    # YBC_mod_covariance: np.ndarray | None = None,
-    # Hbc: np.ndarray | None = None,
     # obs_repeatability: np.ndarray | None = None,
     # obs_variability: np.ndarray | None = None,
     fp_data: dict
     country_file: str
     nbasis: int
-    nperiod: int
+    nperiod: int        
     country_unit_prefix: str | None
+    bcouts_mean: np.ndarray | None = None
+    bcouts_mu: np.ndarray | None = None
+    bcouts_median: np.ndarray | None = None 
+    bcouts_mode: np.ndarray | None = None 
+    bcouts_stdev: np.ndarray | None = None 
+    bcouts_sigma: np.ndarray | None = None 
+    bcouts_68: np.ndarray | None = None 
+    bcouts_95: np.ndarray | None = None
+    Ymodbc_dic: dict | None = None
+    Hbc_dic: dict | None = None
     use_bc: bool = False
     fixed_model_error: float | int | None = None
 
@@ -322,7 +449,7 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     print("Post-processing analytical output")
 
     # Get parameters for output file
-    Hx = np.vstack(list(config.H_dic.values()))
+    Hx = np.vstack(list(config.Hx_dic.values()))
     Y = np.hstack(list(config.Y_dic.values()))
     Yerr = np.hstack(list(config.Yerr_dic.values()))
     Ymod = np.hstack(list(config.Ymod_dic.values()))
@@ -331,20 +458,19 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
 
     nx = Hx.shape[1]
     ny = len(Y)
-
-    # if use_bc:
-    #     nbc = Hbc.shape[0]
-    #     nBC = np.arange(nbc)
-
     nui = np.arange(2)
     nmeasure = np.arange(ny)
     nparam = np.arange(nx)
         
-    # if use_bc:
-    #     YaprioriBC = np.sum(Hbc, axis=0)
-    #     Yapriori = np.sum(Hx.T, axis=1) + np.sum(Hbc.T, axis=1)
-    # else:
-    Yapriori = np.sum(Hx, axis=1)
+    if config.use_bc:
+        Ymodbc = np.hstack(list(config.Ymodbc_dic.values()))
+        Hbc = np.vstack(list(config.Hbc_dic.values()))
+        nbc = Hbc.shape[1]
+        nBC = np.arange(nbc)
+        YaprioriBC = np.sum(Hbc, axis=1)
+        Yapriori = np.sum(Hx, axis=1) + np.sum(Hbc, axis=1)
+    else:
+        Yapriori = np.sum(Hx, axis=1)        
 
     sitenum = np.arange(len(config.sites))
 
@@ -480,9 +606,11 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "Yapriori": (["nmeasure"], Yapriori),
         "Ymod": (["nmeasure"], Ymod),
         "xouts_mean": (["nparam", "period"], config.xouts_mean),
+        "xouts_mu": (["nparam", "period"], config.xouts_mu),
         "xouts_median": (["nparam", "period"], config.xouts_median),
         "xouts_mode": (["nparam", "period"], config.xouts_mode),
         "xouts_stdev": (["nparam", "period"], config.xouts_stdev),
+        "xouts_sigma": (["nparam", "period"], config.xouts_sigma),
         "xouts_68": (["nparam", "nUI", "period"], config.xouts_68),
         "xouts_95": (["nparam", "nUI", "period"], config.xouts_95),
         "siteindicator": (["nmeasure"], siteindicator),
@@ -513,15 +641,21 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "periodstart": (["period"], date_range(to_datetime(config.start_date), to_datetime(config.end_date), freq="MS")[:-1])
     }
 
-    # if use_bc:
-    #     data_vars.update({
-    #         "YaprioriBC": (["nmeasure"], YaprioriBC),
-    #         "YmodBC": (["nmeasure"], YBC_mod),
-    #         "YmodBC_covariance": (["nmeasure", "nmeasure"], YBC_mod_covariance),
-    #         "bcouts": (["nBC"], bcouts),
-    #         "bcsensitivity": (["nmeasure", "nBC"], Hbc.T),
-    #     })
-    #     coords["numBC"] = (["nBC"], nBC)
+    if config.use_bc:
+        coords["numBC"] = (["nBC"], nBC)
+        data_vars.update({
+            "YaprioriBC": (["nmeasure"], YaprioriBC),
+            "YmodBC": (["nmeasure"], Ymodbc),
+            "bcouts_mean": (["nBC", "period"], config.bcouts_mean),
+            "bcouts_mu": (["nBC", "period"], config.bcouts_mu),
+            "bcouts_median": (["nBC", "period"], config.bcouts_median),
+            "bcouts_mode": (["nBC", "period"], config.bcouts_mode),
+            "bcouts_stdev": (["nBC", "period"], config.bcouts_stdev),
+            "bcouts_sigma": (["nBC", "period"], config.bcouts_sigma),
+            "bcouts_68": (["nBC", "nUI", "period"], config.bcouts_68),
+            "bcouts_95": (["nBC", "nUI", "period"], config.bcouts_95),
+            "bcsensitivity": (["nmeasure", "nBC"], Hbc),
+        })
 
     outds = xr.Dataset(data_vars, coords=coords)
 
@@ -556,14 +690,14 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     outds.countrydefinition.attrs["longname"] = "grid definition of countries"
     outds.xsensitivity.attrs["longname"] = "emissions sensitivity timeseries"
 
-    # if use_bc:
-    #     outds.YmodBC.attrs["units"] = obs_units + " " + "mol/mol"
-    #     outds.YaprioriBC.attrs["units"] = obs_units + " " + "mol/mol"
-    #     outds.bcsensitivity.attrs["units"] = obs_units + " " + "mol/mol"
+    if config.use_bc:
+        outds.YmodBC.attrs["units"] = obs_units + " " + "mol/mol"
+        outds.YaprioriBC.attrs["units"] = obs_units + " " + "mol/mol"
+        outds.bcsensitivity.attrs["units"] = obs_units + " " + "mol/mol"
 
-    #     outds.YaprioriBC.attrs["longname"] = "a priori simulated boundary conditions"
-    #     outds.YmodBC.attrs["longname"] = "mean of posterior simulated boundary conditions"
-    #     outds.bcsensitivity.attrs["longname"] = "boundary conditions sensitivity timeseries"
+        outds.YaprioriBC.attrs["longname"] = "a priori simulated boundary conditions"
+        outds.YmodBC.attrs["longname"] = "mean of posterior simulated boundary conditions"
+        outds.bcsensitivity.attrs["longname"] = "boundary conditions sensitivity timeseries"
 
     outds.attrs["Fixed model error"] = config.fixed_model_error
     outds.attrs["Start date"] = config.start_date

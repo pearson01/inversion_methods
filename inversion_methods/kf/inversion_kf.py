@@ -108,29 +108,41 @@ def kalmanfilter(config: InversionIntermediate):
     bcprior_mu = config.bcprior["mu"]
 
     xb = np.ones(config.nbasis) * xprior_mu
-    bcb = np.ones(4) * bcprior_mu
 
     if config.use_bc is True:
+        bcouts_mu = np.zeros((4, config.nperiod))
+        bcouts_sigma = np.zeros((4, config.nperiod))
+        bcouts_68 = np.zeros((4, 2, config.nperiod))
+        bcouts_95 = np.zeros((4, 2, config.nperiod))
+        Ymodbc_dic = {}
+        
         nparam = config.nbasis + 4
+        bcb = np.ones(4) * bcprior_mu
         xb = np.append(xb, bcb)
 
         P_prior = np.zeros((nparam, nparam))
-        P_prior[:config.nbasis, :config.basis] = config.x_covariance
+        P_prior[:config.nbasis, :config.nbasis] = config.x_covariance
         P_prior[config.nbasis:, config.nbasis:] = config.bc_covariance
 
     else:
         nparam = config.nbasis
         P_prior = config.x_covariance
-
+        bcouts_mu = None
+        bcouts_sigma = None
+        bcouts_68 = None
+        bcouts_95 = None
+        Ymodbc_dic = None
+        bcb = None
+    
     Ymod_dic = {}
 
     periods = np.arange(config.nperiod)
     Q = np.eye(nparam) * 0
 
-    xouts_mu = np.zeros((nparam, config.nperiod))
-    xouts_sigma = np.zeros((nparam, config.nperiod))
-    xouts_68 = np.zeros((nparam, 2, config.nperiod))
-    xouts_95 = np.zeros((nparam, 2, config.nperiod))
+    xouts_mu = np.zeros((config.nbasis, config.nperiod))
+    xouts_sigma = np.zeros((config.nbasis, config.nperiod))
+    xouts_68 = np.zeros((config.nbasis, 2, config.nperiod))
+    xouts_95 = np.zeros((config.nbasis, 2, config.nperiod))
 
     for t in periods:
         if config.use_bc:
@@ -164,8 +176,8 @@ def kalmanfilter(config: InversionIntermediate):
     
         Pf = P_prior + Q
     
-        xouts_mu[:,t] = xa
-        xouts_sigma[:,t] = np.diag(Pa)**0.5
+        xouts_mu[:,t] = xa[:config.nbasis]
+        xouts_sigma[:,t] = np.diag(Pa)[:config.nbasis]**0.5
         
         xouts_68[:, 0, t] = xouts_mu[:,t] - xouts_sigma[:,t]
         xouts_68[:, 1, t] = xouts_mu[:,t] + xouts_sigma[:,t]
@@ -173,15 +185,31 @@ def kalmanfilter(config: InversionIntermediate):
         xouts_95[:, 0, t] = xouts_mu[:,t] - 2*xouts_sigma[:,t]
         xouts_95[:, 1, t] = xouts_mu[:,t] + 2*xouts_sigma[:,t]
         
+        if config.use_bc:
+            
+            bcouts_sigma[:,t] = np.diag(Pa)[config.nbasis:]**0.5
+            bcouts_mu[:,t] = xa[config.nbasis:]
+                        
+            bcouts_68[:, 0, t] = bcouts_mu[:,t] - bcouts_sigma[:,t]
+            bcouts_68[:, 1, t] = bcouts_mu[:,t] + bcouts_sigma[:,t]
 
-        Ymod_dic[t] = H @ xouts_mu[:,t]
+            bcouts_95[:, 0, t] = bcouts_mu[:,t] - 2*bcouts_sigma[:,t]
+            bcouts_95[:, 1, t] = bcouts_mu[:,t] + 2*bcouts_sigma[:,t]
+            
+            Ymod_dic[t] = H @ np.append(xouts_mu[:,t], bcouts_mu[:,t])
+            Ymodbc_dic[t] = config.Hbc_dic[t] @ bcouts_mu[:,t]
 
-    return xouts_mu, xouts_68, xouts_95, Ymod_dic, nparam, config.fixed_model_error
+        else:
+
+            Ymod_dic[t] = H @ xouts_mu[:,t]
+
+    return xouts_mu, xouts_sigma, xouts_68, xouts_95, bcouts_mu, bcouts_sigma, bcouts_68, bcouts_95, Ymod_dic, Ymodbc_dic, nparam, config.fixed_model_error
 
 
 @dataclass
 class PostProcessInput:
-    xouts: np.ndarray
+    xouts_mu: np.ndarray
+    xouts_sigma: np.ndarray
     xouts_68: np.ndarray
     xouts_95: np.ndarray
     H_dic: dict
@@ -198,11 +226,6 @@ class PostProcessInput:
     outputname: str
     outputpath: str
     emissions_name: str
-    # bcouts,
-    # bcouts_covariance: np.ndarray | None = None,
-    # YBC_mod: np.ndarray | None = None,
-    # YBC_mod_covariance: np.ndarray | None = None,
-    # Hbc: np.ndarray | None = None,
     # obs_repeatability: np.ndarray | None = None,
     # obs_variability: np.ndarray | None = None,
     fp_data: dict
@@ -210,6 +233,12 @@ class PostProcessInput:
     nbasis: int
     nperiod: int
     country_unit_prefix: str | None
+    bcouts_mu: np.ndarray | None = None
+    bcouts_sigma: np.ndarray | None = None
+    bcouts_68: np.ndarray | None = None 
+    bcouts_95: np.ndarray | None = None
+    Ymodbc_dic: dict | None = None
+    Hbc_dic: dict | None = None
     use_bc: bool = False
     fixed_model_error: float | int | None = None
 
@@ -302,20 +331,19 @@ def kf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
 
     nx = Hx.shape[1]
     ny = len(Y)
-
-    # if use_bc:
-    #     nbc = Hbc.shape[0]
-    #     nBC = np.arange(nbc)
-
     nui = np.arange(2)
     nmeasure = np.arange(ny)
     nparam = np.arange(nx)
-        
-    # if use_bc:
-    #     YaprioriBC = np.sum(Hbc, axis=0)
-    #     Yapriori = np.sum(Hx.T, axis=1) + np.sum(Hbc.T, axis=1)
-    # else:
-    Yapriori = np.sum(Hx, axis=1)
+
+    if config.use_bc:
+        Ymodbc = np.hstack(list(config.Ymodbc_dic.values()))
+        Hbc = np.vstack(list(config.Hbc_dic.values()))
+        nbc = Hbc.shape[1]
+        nBC = np.arange(nbc)
+        YaprioriBC = np.sum(Hbc, axis=1)
+        Yapriori = np.sum(Hx, axis=1) + np.sum(Hbc, axis=1)
+    else:
+        Yapriori = np.sum(Hx, axis=1)    
 
     sitenum = np.arange(len(config.sites))
 
@@ -336,7 +364,7 @@ def kf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         scalemap_single = np.zeros_like(bfds.values)
 
         for basis in np.arange(config.nbasis):
-            scalemap_single[bfds.values == (basis + 1)] = config.xouts[basis, period]
+            scalemap_single[bfds.values == (basis + 1)] = config.xouts_mu[basis, period]
 
         scalemap.append(scalemap_single)
     
@@ -412,7 +440,7 @@ def kf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
                 bothinds = np.logical_and(cntrygrid == ci, bfarray == bf)
                 cntrytot += (
                     np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
-                    * config.xouts[bf, period]
+                    * config.xouts_mu[bf, period]
                     / unit_factor
                 )
                 cntrytotprior += (
@@ -434,7 +462,7 @@ def kf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "Ytime": (["nmeasure"], Ytime),
         "Yapriori": (["nmeasure"], Yapriori),
         "Ymod": (["nmeasure"], Ymod),
-        "xouts": (["nparam", "period"], config.xouts),
+        "xouts_mu": (["nparam", "period"], config.xouts_mu),
         "xouts_68": (["nparam", "nUI", "period"], config.xouts_68),
         "xouts_95": (["nparam", "nUI", "period"], config.xouts_95),
         "siteindicator": (["nmeasure"], siteindicator),
@@ -463,15 +491,17 @@ def kf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "periodstart": (["period"], date_range(to_datetime(config.start_date), to_datetime(config.end_date), freq="MS")[:-1])
     }
 
-    # if use_bc:
-    #     data_vars.update({
-    #         "YaprioriBC": (["nmeasure"], YaprioriBC),
-    #         "YmodBC": (["nmeasure"], YBC_mod),
-    #         "YmodBC_covariance": (["nmeasure", "nmeasure"], YBC_mod_covariance),
-    #         "bcouts": (["nBC"], bcouts),
-    #         "bcsensitivity": (["nmeasure", "nBC"], Hbc.T),
-    #     })
-    #     coords["numBC"] = (["nBC"], nBC)
+    if config.use_bc:
+        data_vars.update({
+            "YaprioriBC": (["nmeasure"], YaprioriBC),
+            "YmodBC": (["nmeasure"], Ymodbc),
+            "bcouts_mu": (["nBC", "period"], config.bcouts_mu),
+            "bcouts_sigma": (["nBC", "period"], config.bcouts_sigma),
+            "bcouts_68": (["nBC", "nUI", "period"], config.bcouts_68),
+            "bcouts_95": (["nBC", "nUI", "period"], config.bcouts_95),
+            "bcsensitivity": (["nmeasure", "nBC"], Hbc),
+        })
+        coords["numBC"] = (["nBC"], nBC)
 
     outds = xr.Dataset(data_vars, coords=coords)
 
@@ -504,14 +534,14 @@ def kf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     outds.countrydefinition.attrs["longname"] = "grid definition of countries"
     outds.xsensitivity.attrs["longname"] = "emissions sensitivity timeseries"
 
-    # if use_bc:
-    #     outds.YmodBC.attrs["units"] = obs_units + " " + "mol/mol"
-    #     outds.YaprioriBC.attrs["units"] = obs_units + " " + "mol/mol"
-    #     outds.bcsensitivity.attrs["units"] = obs_units + " " + "mol/mol"
+    if config.use_bc:
+        outds.YmodBC.attrs["units"] = obs_units + " " + "mol/mol"
+        outds.YaprioriBC.attrs["units"] = obs_units + " " + "mol/mol"
+        outds.bcsensitivity.attrs["units"] = obs_units + " " + "mol/mol"
 
-    #     outds.YaprioriBC.attrs["longname"] = "a priori simulated boundary conditions"
-    #     outds.YmodBC.attrs["longname"] = "mean of posterior simulated boundary conditions"
-    #     outds.bcsensitivity.attrs["longname"] = "boundary conditions sensitivity timeseries"
+        outds.YaprioriBC.attrs["longname"] = "a priori simulated boundary conditions"
+        outds.YmodBC.attrs["longname"] = "mean of posterior simulated boundary conditions"
+        outds.bcsensitivity.attrs["longname"] = "boundary conditions sensitivity timeseries"
 
     outds.attrs["Fixed model error"] = config.fixed_model_error
     outds.attrs["Start date"] = config.start_date

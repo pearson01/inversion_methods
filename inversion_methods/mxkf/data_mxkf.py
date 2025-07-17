@@ -140,22 +140,21 @@ def build_obs_vectors(fp_data, sites):
 def build_boundary_conditions(fp_data, sites, config: DataConfig):
 
     if not config.use_bc:
-        return None, None, None
+        return None, None
+    
+    else:
+        for si, site in enumerate(sites):
+            if config.bc_freq == "monthly":
+                Hmbc = setup.monthly_bcs(config.start_date, config.end_date, site, fp_data)
+            elif config.bc_freq is None:
+                Hmbc = fp_data[site].H_bc.values
+            else:
+                Hmbc = setup.create_bc_sensitivity(config.start_date, config.end_date, site, fp_data, config.bc_freq)
 
-    Hbc = np.zeros((0, fp_data[sites[0]].H_bc.shape[1]))
+            Hbc = Hmbc if si == 0 else np.hstack((Hbc, Hmbc))
 
-    for si, site in enumerate(sites):
-        if config.bc_freq == "monthly":
-            Hmbc = setup.monthly_bcs(config.start_date, config.end_date, site, fp_data)
-        elif config.bc_freq is None:
-            Hmbc = fp_data[site].H_bc.values
-        else:
-            Hmbc = setup.create_bc_sensitivity(config.start_date, config.end_date, site, fp_data, config.bc_freq)
-
-        Hbc = np.vstack((Hbc, Hmbc))
-
-    bc_covariance = np.eye(4) * config.bcprior["sigma"]**2
-    return Hbc, Hbc.shape[0], bc_covariance
+        bc_covariance = np.eye(4) * config.bcprior["sigma"]**2
+        return Hbc, bc_covariance
 
 
 def build_x_covariance(fp_data, nbasis, config: DataConfig):
@@ -188,8 +187,8 @@ def extract_data(config: DataConfig):
     update_log_normal_prior(config.xprior)
     update_log_normal_prior(config.bcprior)
 
-    Hbc, nbc, bc_cov = build_boundary_conditions(fp_data, config.sites, config)
+    Hbc, bc_cov = build_boundary_conditions(fp_data, config.sites, config)
     x_cov = build_x_covariance(fp_data, nbasis, config)
 
-    return Hx, Y, Ytime, error, siteindicator, nbasis, config.xprior, x_cov, bc_cov, config.bcprior, Hbc, nbc, bc_cov, fp_data
+    return Hx, Y, Ytime, error, siteindicator, nbasis, config.xprior, x_cov, bc_cov, config.bcprior, Hbc, bc_cov, fp_data
 
