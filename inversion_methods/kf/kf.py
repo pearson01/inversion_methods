@@ -109,8 +109,6 @@ def kf_function(config: InversionParameters):
     bc_covariance, 
     bcprior, 
     Hbc, 
-    nbc, 
-    bc_covariance, 
     fp_data
     ) = extract_data(data_config)
     
@@ -139,10 +137,17 @@ def kf_function(config: InversionParameters):
 
     start_kalman = time.time()
 
-    (xouts, 
+    (
+    xouts_mu,
+    xouts_sigma,  
     xouts_68, 
     xouts_95, 
-    Ymod_dic,
+    bcouts_mu,
+    bcouts_sigma, 
+    bcouts_68, 
+    bcouts_95, 
+    Ymod_dic, 
+    Ymodbc_dic,
     nparam,
     fixed_model_error,
     ) = kalmanfilter(inversion_intermediate)
@@ -154,7 +159,8 @@ def kf_function(config: InversionParameters):
 
     start_post = time.time()
 
-    post_process_input = PostProcessInput(xouts=xouts,
+    post_process_input = PostProcessInput(xouts_mu=xouts_mu,
+                                          xouts_sigma=xouts_sigma,
                                           xouts_68=xouts_68,
                                           xouts_95=xouts_95,
                                           H_dic=inversion_intermediate.H_dic,
@@ -172,11 +178,12 @@ def kf_function(config: InversionParameters):
                                           outputpath=config.outputpath,
                                           country_unit_prefix=config.country_unit_prefix,
                                           emissions_name=config.emissions_name,
-                                          # bcouts,
-                                          # bcouts_covariance,
-                                          # YBC_mod,
-                                          # YBC_mod_covariance,
-                                          # Hbc,
+                                          bcouts_mu = bcouts_mu,
+                                          bcouts_sigma=bcouts_sigma,
+                                          bcouts_68=bcouts_68,
+                                          bcouts_95=bcouts_95,
+                                          Ymodbc_dic=Ymodbc_dic,
+                                          Hbc_dic=inversion_intermediate.Hbc_dic,
                                           # obs_repeatability,
                                           # obs_variability,
                                           fp_data=fp_data,
