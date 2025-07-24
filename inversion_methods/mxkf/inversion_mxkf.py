@@ -3,6 +3,8 @@ from pathlib import Path
 
 import numpy as np
 import xarray as xr
+import arviz as az
+from scipy import stats
 from pandas import date_range, to_datetime
 from dataclasses import dataclass
 
@@ -63,13 +65,13 @@ def mxkf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
     Ymonth = to_datetime(config.Ytime).to_period("M")
     nperiod = len(allmonth)
 
-    if config.use_bc is True:
+    if config.use_bc:
         Hbc_dic = {}
+        bc_count = np.arange(0, config.Hbc.shape[0], nperiod)
 
     else:
         Hbc_dic = None
 
-    bc_count = 0
     for period in range(nperiod):
         mnth = allmonth[period].month
         yr = allmonth[period].year
@@ -80,8 +82,8 @@ def mxkf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
         H_dic[period] = config.Hx.T[mnthloc, :]
         siteindicator_dic[period] = config.siteindicator[mnthloc]
         if config.use_bc:
-            Hbc_dic[period] = config.Hbc.T[mnthloc, bc_count:bc_count+4]
-            bc_count += 4
+            Hbc_dic[period] = config.Hbc.T[np.ix_(mnthloc, bc_count)]
+            bc_count += 1
 
     return InversionIntermediate(Y_dic=Y_dic, 
                                  Yerr_dic=Yerr_dic,
@@ -104,7 +106,7 @@ def mxkf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
 
 def mx_kalmanfilter(config: InversionIntermediate):
 
-    if config.use_bc is True:
+    if config.use_bc:
         
         bcouts_median = np.zeros((4, config.nperiod))
         bcouts_stdev = np.zeros((4, config.nperiod))
@@ -215,7 +217,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
 
         K = Pf @ H_hat.T @ woodbury(R_inv, H_hat, Pf, H_hat.T)
         # K = Pf @ H_hat.T @ np.linalg.inv(H_hat @ Pf @ H_hat.T + R)
-        
+
         if config.xprior["pdf"] == "normal":
             xb_step = xb[:config.nbasis]
         elif config.xprior["pdf"] == "lognormal":
@@ -246,8 +248,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
 
         Pa = (np.eye(nparam) - K @ H_hat) @ Pf
 
-        print(f"{t} - Condition of R_inv: {round(np.linalg.cond(R_inv),2)}, H_hat: {round(np.linalg.cond(H_hat),2)}, Pf: {round(np.linalg.cond(Pf),2)}, Pf_inv + H_hat.T @ R_inv @ H_hat: {round(np.linalg.cond(np.linalg.inv(Pf) + H_hat.T@R_inv@H_hat),2)}")
-
+        # print(f"{t} - Condition of R_inv: {round(np.linalg.cond(R_inv),2)}, H_hat: {round(np.linalg.cond(H_hat),2)}, Pf: {round(np.linalg.cond(Pf),2)}, Pf_inv + H_hat.T @ R_inv @ H_hat: {round(np.linalg.cond(np.linalg.inv(Pf) + H_hat.T@R_inv@H_hat),2)}")
         # Pf = Pa + Q
         # xb = xa
     
@@ -289,7 +290,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
             bcouts_sigma[:,t] = np.diag(Pa)[config.nbasis:]**0.5
             bcouts_mu[:,t] = xa_mu[config.nbasis:]
 
-            if config.xprior["pdf"] == "normal":
+            if config.bcprior["pdf"] == "normal":
                 
                 bcouts_stdev[:,t] = bcouts_sigma[:,t]
                 bcouts_mean[:,t] = bcouts_mu[:,t]
@@ -302,7 +303,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
                 
                 bcouts_mode[:,t] = bcouts_mu[:,t]
 
-            elif config.xprior["pdf"] == "lognormal":
+            elif config.bcprior["pdf"] == "lognormal":
 
                 bcouts_stdev[:,t] = ((np.exp(bcouts_sigma[:,t]**2) - 1) * np.exp(2*bcouts_mu[:,t] + bcouts_sigma[:,t]**2))**0.5
                 bcouts_mean[:,t] = np.exp(bcouts_mu[:,t] + 0.5*bcouts_sigma[:,t]**2)
@@ -335,6 +336,7 @@ class PostProcessInput:
     xouts_sigma: np.ndarray
     xouts_68: np.ndarray
     xouts_95: np.ndarray
+    xprior: dict
     Hx_dic: dict
     Y_dic: dict
     Ymod_dic: dict
@@ -364,10 +366,41 @@ class PostProcessInput:
     bcouts_sigma: np.ndarray | None = None 
     bcouts_68: np.ndarray | None = None 
     bcouts_95: np.ndarray | None = None
+    bcprior: dict | None = None
     Ymodbc_dic: dict | None = None
     Hbc_dic: dict | None = None
     use_bc: bool = False
     fixed_model_error: float | int | None = None
+
+
+def mxkf_outs_trace(
+        xouts_mu: np.ndarray, 
+        xouts_sigma: np.ndarray, 
+        xprior: dict, 
+        nbasis: int, 
+        nperiod: int,
+        nsamples: int = 15000,
+        ):
+    
+    xtrace = np.zeros((nsamples, nbasis, nperiod))
+
+    for period in np.arange(nperiod):
+        
+        normal_samples = np.random.randn(nsamples,nbasis)
+
+        if xprior["pdf"] == "normal":
+            
+            xtrace[:,:,period] = xouts_mu[:,period] + xouts_sigma[:,period] * normal_samples
+
+        elif xprior["pdf"] == "lognormal":
+            
+            xtrace[:,:,period] = np.exp(xouts_mu[:,period] + xouts_sigma[:,period] * normal_samples)
+        
+        else:
+            
+            raise ValueError("Xprior must be lognormal or normal.")
+
+    return xtrace, nsamples
 
 
 def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
@@ -549,9 +582,9 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     cntrymean = np.zeros((len(cntrynames), config.nperiod))
     cntrymedian = np.zeros((len(cntrynames), config.nperiod))
     cntrymode = np.zeros((len(cntrynames), config.nperiod))
-    # cntry68 = np.zeros((len(cntrynames), len(nui), nperiod))
-    # cntry95 = np.zeros((len(cntrynames), len(nui), nperiod))
-    # cntrysd = np.zeros((len(cntrynames), nperiod))
+    cntry68 = np.zeros((len(cntrynames), len(nui), config.nperiod))
+    cntry95 = np.zeros((len(cntrynames), len(nui), config.nperiod))
+    cntrysd = np.zeros((len(cntrynames), config.nperiod))
     cntryprior = np.zeros((len(cntrynames), config.nperiod))
 
     if config.country_unit_prefix is None:
@@ -560,41 +593,37 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
 
     obs_units = str(config.fp_data[".units"])
 
-    for period in np.arange(config.nperiod):
+    xtrace, steps = mxkf_outs_trace(xouts_mu=config.xouts_mu, xouts_sigma=config.xouts_sigma, xprior=config.xprior, nbasis=config.nbasis, nperiod=config.nperiod)
 
+    for period in np.arange(config.nperiod):
+        
         for ci, cntry in enumerate(cntrynames):
-            cntrytotmean = 0
-            cntrytotmedian = 0
-            cntrytotmode = 0
+            cntrytottrace = np.zeros(steps)
             cntrytotprior = 0
             for bf in range(int(np.max(bfarray)) + 1):
                 bothinds = np.logical_and(cntrygrid == ci, bfarray == bf)
-                cntrytotmean += (
+                cntrytottrace += (
                     np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
-                    * config.xouts_mean[bf, period]
-                    / unit_factor
-                )
-                cntrytotmedian += (
-                    np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
-                    * config.xouts_median[bf, period]
-                    / unit_factor
-                )
-                cntrytotmode += (
-                    np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
-                    * config.xouts_mode[bf, period]
+                    * xtrace[:, bf, period]
                     / unit_factor
                 )
                 cntrytotprior += (
                     np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
                     / unit_factor
                 )
-            
-            cntrymean[ci, period] = cntrytotmean
-            cntrymedian[ci, period] = cntrytotmedian
-            cntrymode[ci, period] = cntrytotmode
-            # cntrysd[ci, period] = np.std(cntrytottrace)
-            # cntry68[ci, :, period] = pm.stats.hdi(cntrytottrace.values, 0.68)
-            # cntry95[ci, :, period] = pm.stats.hdi(cntrytottrace.values, 0.95)
+            cntrymean[ci, period] = np.mean(cntrytottrace)
+            cntrymedian[ci, period] = np.median(cntrytottrace)
+
+            if np.nanmax(cntrytottrace) > np.nanmin(cntrytottrace):
+                xes = np.linspace(np.nanmin(cntrytottrace), np.nanmax(cntrytottrace), 200)
+                kde = stats.gaussian_kde(cntrytottrace).evaluate(xes)
+                cntrymode[ci, period] = xes[kde.argmax()]
+            else:
+                cntrymode[ci, period] = np.mean(cntrytottrace)
+
+            cntrysd[ci, period] = np.std(cntrytottrace)
+            cntry68[ci, :, period] = az.hdi(cntrytottrace, 0.68)
+            cntry95[ci, :, period] = az.hdi(cntrytottrace, 0.95)
             cntryprior[ci, period] = cntrytotprior
 
 
@@ -627,6 +656,9 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "countrymedian": (["countrynames", "period"], cntrymedian),
         "countrymode": (["countrynames", "period"], cntrymode),
         "countryapriori": (["countrynames", "period"], cntryprior),
+        "countrysd": (["countrynames", "period"], cntrysd),
+        "country68": (["countrynames", "nUI", "period"], cntry68),
+        "country95": (["countrynames", "nUI", "period"], cntry95)
     }
 
 

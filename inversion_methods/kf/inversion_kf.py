@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import xarray as xr
+import arviz as az
 from pandas import date_range, to_datetime
 from dataclasses import dataclass
 
@@ -63,8 +64,9 @@ def kf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
     Ymonth = to_datetime(config.Ytime).to_period("M")
     nperiod = len(allmonth)
 
-    if config.use_bc is True:
+    if config.use_bc:
         Hbc_dic = {}
+        bc_count = np.arange(0, config.Hbc.shape[0], nperiod)
 
     else:
         Hbc_dic = None
@@ -80,8 +82,8 @@ def kf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
         H_dic[period] = config.Hx.T[mnthloc, :]
         siteindicator_dic[period] = config.siteindicator[mnthloc]
         if config.use_bc:
-            Hbc_dic[period] = config.Hbc.T[mnthloc, bc_count:bc_count+4]
-            bc_count += 4
+            Hbc_dic[period] = config.Hbc.T[np.ix_(mnthloc, bc_count)]
+            bc_count += 1
 
     return InversionIntermediate(Y_dic=Y_dic, 
                                  Yerr_dic=Yerr_dic,
@@ -241,6 +243,25 @@ class PostProcessInput:
     Hbc_dic: dict | None = None
     use_bc: bool = False
     fixed_model_error: float | int | None = None
+
+
+def kf_outs_trace(
+        xouts_mu: np.ndarray, 
+        xouts_sigma: np.ndarray, 
+        nbasis: int, 
+        nperiod: int,
+        nsamples: int = 15000,
+        ):
+    
+    xtrace = np.zeros((nsamples, nbasis, nperiod))
+
+    for period in np.arange(nperiod):
+        
+        normal_samples = np.random.randn(nsamples,nbasis)
+ 
+        xtrace[:,:,period] = xouts_mu[:,period] + xouts_sigma[:,period] * normal_samples
+
+    return xtrace, nsamples
 
 
 def kf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
@@ -420,9 +441,9 @@ def kf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     unit_factor = convert.prefix(config.country_unit_prefix)
 
     cntrymean = np.zeros((len(cntrynames), config.nperiod))
-    # cntry68 = np.zeros((len(cntrynames), len(nui), nperiod))
-    # cntry95 = np.zeros((len(cntrynames), len(nui), nperiod))
-    # cntrysd = np.zeros((len(cntrynames), nperiod))
+    cntry68 = np.zeros((len(cntrynames), len(nui), config.nperiod))
+    cntry95 = np.zeros((len(cntrynames), len(nui), config.nperiod))
+    cntrysd = np.zeros((len(cntrynames), config.nperiod))
     cntryprior = np.zeros((len(cntrynames), config.nperiod))
 
     if config.country_unit_prefix is None:
@@ -431,27 +452,29 @@ def kf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
 
     obs_units = str(config.fp_data[".units"])
 
+    xtrace, steps = kf_outs_trace(xouts_mu=config.xouts_mu, xouts_sigma=config.xouts_sigma, nbasis=config.nbasis, nperiod=config.nperiod)
+
     for period in np.arange(config.nperiod):
 
         for ci, cntry in enumerate(cntrynames):
-            cntrytot = 0
+            cntrytottrace = np.zeros(steps)
             cntrytotprior = 0
             for bf in range(int(np.max(bfarray)) + 1):
                 bothinds = np.logical_and(cntrygrid == ci, bfarray == bf)
-                cntrytot += (
+                cntrytottrace += (
                     np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
-                    * config.xouts_mu[bf, period]
+                    * xtrace[:, bf, period]
                     / unit_factor
                 )
                 cntrytotprior += (
                     np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
                     / unit_factor
                 )
-            
-            cntrymean[ci, period] = cntrytot
-            # cntrysd[ci, period] = np.std(cntrytottrace)
-            # cntry68[ci, :, period] = pm.stats.hdi(cntrytottrace.values, 0.68)
-            # cntry95[ci, :, period] = pm.stats.hdi(cntrytottrace.values, 0.95)
+            cntrymean[ci, period] = np.mean(cntrytottrace)
+
+            cntrysd[ci, period] = np.std(cntrytottrace)
+            cntry68[ci, :, period] = az.hdi(cntrytottrace, 0.68)
+            cntry95[ci, :, period] = az.hdi(cntrytottrace, 0.95)
             cntryprior[ci, period] = cntrytotprior
 
 
@@ -477,6 +500,9 @@ def kf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "scaling": (["lat", "lon", "period"], scalemap),
         "countrymean": (["countrynames", "period"], cntrymean),
         "countryapriori": (["countrynames", "period"], cntryprior),
+        "countrysd": (["countrynames", "period"], cntrysd),
+        "country68": (["countrynames", "nUI", "period"], cntry68),
+        "country95": (["countrynames", "nUI", "period"], cntry95)
     }
 
 

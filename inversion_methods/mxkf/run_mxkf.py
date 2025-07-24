@@ -144,6 +144,4 @@ if __name__ == "__main__":
 
     param = convert_to_type(param)
 
-    print(f"xprior = {param.xprior}")
-
     mxkf_function(param)
