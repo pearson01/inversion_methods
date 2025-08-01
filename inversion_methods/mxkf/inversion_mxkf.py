@@ -5,6 +5,7 @@ import numpy as np
 import xarray as xr
 import arviz as az
 from scipy import stats
+from scipy.linalg import cholesky
 from pandas import date_range, to_datetime
 from dataclasses import dataclass
 
@@ -174,6 +175,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
     xouts_mode = np.zeros((config.nbasis, config.nperiod))
     xouts_68 = np.zeros((config.nbasis, 2, config.nperiod))
     xouts_95 = np.zeros((config.nbasis, 2, config.nperiod))
+    xouts_covariance = np.zeros((config.nbasis, config.nbasis, config.nperiod))
 
     for t in periods:
         
@@ -257,6 +259,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
         xouts_median[:,t] = xa[:config.nbasis]
         xouts_sigma[:,t] = np.diag(Pa)[:config.nbasis]**0.5
         xouts_mu[:,t] = xa_mu[:config.nbasis]
+        xouts_covariance[:,:,t] = Pa[:config.nbasis,:config.nbasis]
 
         if config.xprior["pdf"] == "normal":
         
@@ -323,7 +326,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
 
             Ymod_dic[t] = H @ xouts_mode[:,t]
 
-    return xouts_mean, xouts_median, xouts_mode, xouts_stdev, xouts_mu, xouts_sigma, xouts_68, xouts_95, bcouts_mean, bcouts_median, bcouts_mode, bcouts_stdev, bcouts_mu, bcouts_sigma, bcouts_68, bcouts_95, Ymod_dic, Ymodbc_dic, nparam, config.fixed_model_error
+    return xouts_mean, xouts_median, xouts_mode, xouts_stdev, xouts_mu, xouts_sigma, xouts_68, xouts_95, xouts_covariance, bcouts_mean, bcouts_median, bcouts_mode, bcouts_stdev, bcouts_mu, bcouts_sigma, bcouts_68, bcouts_95, Ymod_dic, Ymodbc_dic, nparam, config.fixed_model_error
 
 
 @dataclass
@@ -336,6 +339,7 @@ class PostProcessInput:
     xouts_sigma: np.ndarray
     xouts_68: np.ndarray
     xouts_95: np.ndarray
+    xouts_covariance: np.ndarray
     xprior: dict
     Hx_dic: dict
     Y_dic: dict
@@ -375,7 +379,7 @@ class PostProcessInput:
 
 def mxkf_outs_trace(
         xouts_mu: np.ndarray, 
-        xouts_sigma: np.ndarray, 
+        xouts_covariance: np.ndarray, 
         xprior: dict, 
         nbasis: int, 
         nperiod: int,
@@ -385,16 +389,18 @@ def mxkf_outs_trace(
     xtrace = np.zeros((nsamples, nbasis, nperiod))
 
     for period in np.arange(nperiod):
-        
+
+        L = cholesky(xouts_covariance[:,:,period], lower=True)
+
         normal_samples = np.random.randn(nsamples,nbasis)
 
         if xprior["pdf"] == "normal":
             
-            xtrace[:,:,period] = xouts_mu[:,period] + xouts_sigma[:,period] * normal_samples
+            xtrace[:,:,period] = xouts_mu[:,period] + normal_samples @ L.T
 
         elif xprior["pdf"] == "lognormal":
             
-            xtrace[:,:,period] = np.exp(xouts_mu[:,period] + xouts_sigma[:,period] * normal_samples)
+            xtrace[:,:,period] = np.exp(xouts_mu[:,period] + normal_samples @ L.T)
         
         else:
             
@@ -593,7 +599,7 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
 
     obs_units = str(config.fp_data[".units"])
 
-    xtrace, steps = mxkf_outs_trace(xouts_mu=config.xouts_mu, xouts_sigma=config.xouts_sigma, xprior=config.xprior, nbasis=config.nbasis, nperiod=config.nperiod)
+    xtrace, steps = mxkf_outs_trace(xouts_mu=config.xouts_mu, xouts_covariance=config.xouts_covariance, xprior=config.xprior, nbasis=config.nbasis, nperiod=config.nperiod)
 
     for period in np.arange(config.nperiod):
         
@@ -642,6 +648,7 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "xouts_sigma": (["nparam", "period"], config.xouts_sigma),
         "xouts_68": (["nparam", "nUI", "period"], config.xouts_68),
         "xouts_95": (["nparam", "nUI", "period"], config.xouts_95),
+        "xouts_covariance": (["nparam", "nparam", "period"], config.xouts_covariance),
         "siteindicator": (["nmeasure"], siteindicator),
         "sitenames": (["nsite"], config.sites),
         "sitelons": (["nsite"], site_lon),
