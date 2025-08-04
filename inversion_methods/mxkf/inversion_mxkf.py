@@ -409,6 +409,37 @@ def mxkf_outs_trace(
     return xtrace, nsamples
 
 
+# def mean_mode_fudge(
+#         xouts_mode: np.ndarray, 
+#         xouts_sigma: np.ndarray
+#         ):
+    
+#     """
+#     Function calculates the mu of a new lognormal distribution, which is defined with a mean equal to the mode of our posterior.
+#     """
+
+#     new_mu = np.log(xouts_mode) - 0.5 * xouts_sigma**2
+
+#     new_mean = np.exp(new_mu + 0.5 * xouts_sigma**2)
+
+#     new_median = np.exp(new_mu)
+
+#     new_mode = np.exp(new_mu - xouts_sigma**2)
+    
+#     new_stdev = ((np.exp(xouts_sigma**2) - 1) * np.exp(2*new_mu + xouts_sigma**2))**0.5
+
+#     new_68 = np.zeros((new_mu.shape[0], 2, new_mu.shape[1]))
+#     new_95 = np.zeros_like(new_68)
+
+#     new_68[:, 0, :] = np.exp(new_mu - xouts_sigma)
+#     new_68[:, 1, :] = np.exp(new_mu + xouts_sigma)
+
+#     new_95[:, 0, :] = np.exp(new_mu - 2*xouts_sigma)
+#     new_95[:, 1, :] = np.exp(new_mu + 2*xouts_sigma)
+
+#     return new_mu, new_mean, new_median, new_mode, new_stdev, new_68, new_95
+
+
 def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     r"""Takes the output from inferpymc function, along with some other input
     information, calculates statistics on them and places it all in a dataset.
@@ -599,6 +630,8 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
 
     obs_units = str(config.fp_data[".units"])
 
+    # config.xouts_mu, config.xouts_mean, config.xouts_median, config.xouts_mode, config.xouts_stdev, config.xouts_68, config.xouts_95 = mean_mode_fudge(config.xouts_median, config.xouts_sigma)
+
     xtrace, steps = mxkf_outs_trace(xouts_mu=config.xouts_mu, xouts_covariance=config.xouts_covariance, xprior=config.xprior, nbasis=config.nbasis, nperiod=config.nperiod)
 
     for period in np.arange(config.nperiod):
@@ -631,7 +664,7 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
             cntry68[ci, :, period] = az.hdi(cntrytottrace, 0.68)
             cntry95[ci, :, period] = az.hdi(cntrytottrace, 0.95)
             cntryprior[ci, period] = cntrytotprior
-
+            
 
     # Make output netcdf file
     data_vars = {
