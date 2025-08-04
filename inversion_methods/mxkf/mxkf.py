@@ -138,7 +138,7 @@ def mxkf_function(config: InversionParameters):
     print(f"Data extraction and preparation complete. Time taken = {end_data-start_data:.4f} seconds")
 
     start_kalman = time.time()
-    
+
     (xouts_mean,
      xouts_median,
      xouts_mode,
@@ -147,6 +147,7 @@ def mxkf_function(config: InversionParameters):
      xouts_sigma, 
      xouts_68, 
      xouts_95,
+     xouts_covariance,
      bcouts_mean, 
      bcouts_median, 
      bcouts_mode, 
@@ -176,6 +177,8 @@ def mxkf_function(config: InversionParameters):
                                           xouts_sigma=xouts_sigma, 
                                           xouts_68=xouts_68,
                                           xouts_95=xouts_95,
+                                          xouts_covariance=xouts_covariance,
+                                          xprior=inversion_intermediate.xprior,
                                           Hx_dic=inversion_intermediate.H_dic,
                                           Y_dic=inversion_intermediate.Y_dic,
                                           Ymod_dic=Ymod_dic,
@@ -199,6 +202,7 @@ def mxkf_function(config: InversionParameters):
                                           bcouts_sigma=bcouts_sigma,
                                           bcouts_68=bcouts_68,
                                           bcouts_95=bcouts_95, 
+                                          bcprior=inversion_intermediate.bcprior,
                                           Ymodbc_dic=Ymodbc_dic,
                                           Hbc_dic=inversion_intermediate.Hbc_dic,
                                           # obs_repeatability,
