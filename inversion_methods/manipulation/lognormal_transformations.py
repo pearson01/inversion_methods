@@ -148,6 +148,10 @@ def update_log_normal_prior(prior):
                 mode = float(prior["mode"])
                 mu, sigma = lognormal_mode_stdev(mode, stdev)
                 del prior["mode"]
+            elif "median" in prior:
+                median = float(prior["median"])
+                mu, sigma = lognormal_median_stdev(median, stdev)
+                del prior["median"]
             else:
                 raise ValueError("prior['stdev'] must be coupled with prior['mean'] or prior['mode']")
             del prior["stdev"]

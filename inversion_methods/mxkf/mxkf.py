@@ -51,6 +51,8 @@ class InversionParameters:
     basis_output_path: str | None = None
     bc_freq: str | None = None
     spatial_decay: float | int | None = None
+    kappa_x: float | None = None
+    kappa_bc: float | None = None
 
 
 def mxkf_function(config: InversionParameters):
@@ -128,7 +130,9 @@ def mxkf_function(config: InversionParameters):
                                      bcprior=bcprior,
                                      x_covariance=x_covariance,
                                      bc_covariance=bc_covariance,
-                                     fixed_model_error = config.fixed_model_error
+                                     fixed_model_error=config.fixed_model_error,
+                                     kappa_x=config.kappa_x,
+                                     kappa_bc=config.kappa_bc
                                      )
 
     inversion_intermediate = mxkf_monthly_dictionaries(inversion_input)
@@ -212,7 +216,9 @@ def mxkf_function(config: InversionParameters):
                                           use_bc=config.use_bc,
                                           nbasis=nbasis,
                                           nperiod=inversion_intermediate.nperiod,
-                                          fixed_model_error=fixed_model_error
+                                          fixed_model_error=fixed_model_error,
+                                          kappa_x=config.kappa_x,
+                                          kappa_bc=config.kappa_bc
                                           )
 
     outsds = mxkf_postprocessouts(post_process_input)

@@ -31,6 +31,8 @@ class InversionInput:
     Hbc: np.ndarray | None = None
     bc_covariance: np.ndarray | None = None
     fixed_model_error: float | int | None = None
+    kappa_x: float | None = None
+    kappa_bc: float | None = None
 
 
 @dataclass
@@ -49,6 +51,8 @@ class InversionIntermediate:
     use_bc: bool = False
     bc_covariance: np.ndarray | None = None
     fixed_model_error: float | int | None = None
+    kappa_x: float | None = None
+    kappa_bc: float | None = None
 
 
 def mxkf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
@@ -99,13 +103,24 @@ def mxkf_monthly_dictionaries(config: InversionInput) -> InversionIntermediate:
                                  bcprior=config.bcprior,
                                  x_covariance=config.x_covariance,
                                  bc_covariance=config.bc_covariance,
-                                 fixed_model_error=config.fixed_model_error
+                                 fixed_model_error=config.fixed_model_error,
+                                 kappa_x=config.kappa_x,
+                                 kappa_bc=config.kappa_bc
                                  )
 
 
 
 
 def mx_kalmanfilter(config: InversionIntermediate):
+    
+    if config.kappa_x is None:
+        config.kappa_x = 0
+
+    if config.kappa_bc is None:
+        config.kappa_bc = 0
+
+    kappas_x = np.ones(config.nbasis) * config.kappa_x
+    M_x = np.diag(kappas_x)
 
     if config.use_bc:
         
@@ -123,6 +138,13 @@ def mx_kalmanfilter(config: InversionIntermediate):
         P_prior = np.zeros((nparam, nparam))
         P_prior[:config.nbasis, :config.nbasis] = config.x_covariance
         P_prior[config.nbasis:, config.nbasis:] = config.bc_covariance
+
+        kappas_bc = np.ones(4) * config.kappa_bc
+        M_bc = np.diag(kappas_bc)
+
+        M = np.zeros((nparam, nparam))
+        M[:config.nbasis, :config.nbasis] = M_x
+        M[config.nbasis:, config.nbasis:] = M_bc
 
         if config.bcprior["pdf"] == "normal":         
             bcprior_median = config.bcprior["mu"]
@@ -149,7 +171,9 @@ def mx_kalmanfilter(config: InversionIntermediate):
         bcouts_95 = None
         bcb = None
         Ymodbc_dic = None
-
+        M = M_x
+    
+    M_trans = np.zeros_like(M)
     Ymod_dic = {}
 
     if config.xprior["pdf"] == "normal":         
@@ -199,7 +223,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
         else:
             H = config.H_dic[t]
             Wb = np.diag(Wb_x)
-
+                
         Y = config.Y_dic[t]
 
         if config.fixed_model_error is None:
@@ -215,46 +239,53 @@ def mx_kalmanfilter(config: InversionIntermediate):
         H_hat = Wo_inv @ H @ Wb
         
         if t == 0:
-            Pf = P_prior + Q
+            Pf = P_prior
+            xb_prior = xb
 
         K = Pf @ H_hat.T @ woodbury(R_inv, H_hat, Pf, H_hat.T)
         # K = Pf @ H_hat.T @ np.linalg.inv(H_hat @ Pf @ H_hat.T + R)
 
         if config.xprior["pdf"] == "normal":
-            xb_step = xb[:config.nbasis]
+            xb_mu = xb[:config.nbasis]
         elif config.xprior["pdf"] == "lognormal":
-            xb_step = np.log(xb[:config.nbasis])
+            xb_mu = np.log(xb[:config.nbasis])
 
         if config.use_bc:
             if config.bcprior["pdf"] == "normal":
-                bc_step = xb[config.nbasis:]
+                bc_mu = xb[config.nbasis:]
             elif config.bcprior["pdf"] == "lognormal":
-                bc_step = np.log(xb[config.nbasis:])
+                bc_mu = np.log(xb[config.nbasis:])
 
-            xb_step = np.append(xb_step, bc_step)
+            xb_mu = np.append(xb_mu, bc_mu)
         
         ## xb_step here represents the Gaussian converted xb vector. That is, the lognormal components of xb are converted to log space.
 
-        xa_mu = xb_step + K @ (Y - H @ xb)
+        xa_mu = xb_mu + K @ (Y - H @ xb)
 
         if config.xprior["pdf"] == "normal":
             xa[:config.nbasis] = xa_mu[:config.nbasis]
+            M_trans[:config.nbasis, :config.nbasis] = M_x
         elif config.xprior["pdf"] == "lognormal":
             xa[:config.nbasis] = np.exp(xa_mu[:config.nbasis])
+            M_trans[:config.nbasis, :config.nbasis] = np.diag((kappas_x*xa[:config.nbasis]) / (kappas_x*xa[:config.nbasis] + (np.ones(config.nbasis) - kappas_x)*np.ones(config.nbasis)*xprior_median))
 
         if config.use_bc:
             if config.bcprior["pdf"] == "normal":
                 xa[config.nbasis:] = xa_mu[config.nbasis:]
+                M_trans[config.nbasis:, config.nbasis:] = M_bc
             elif config.bcprior["pdf"] == "lognormal":
                 xa[config.nbasis:] = np.exp(xa_mu[config.nbasis:])
+                M_trans[config.nbasis:, config.nbasis:] = np.diag((kappas_bc*xa[config.nbasis:]) / (kappas_bc*xa[config.nbasis:] + (np.ones(4) - kappas_bc)*np.ones(4)*bcprior_median))
 
         Pa = (np.eye(nparam) - K @ H_hat) @ Pf
 
         # print(f"{t} - Condition of R_inv: {round(np.linalg.cond(R_inv),2)}, H_hat: {round(np.linalg.cond(H_hat),2)}, Pf: {round(np.linalg.cond(Pf),2)}, Pf_inv + H_hat.T @ R_inv @ H_hat: {round(np.linalg.cond(np.linalg.inv(Pf) + H_hat.T@R_inv@H_hat),2)}")
         # Pf = Pa + Q
-        # xb = xa
+
+        xb = M @ xa + (np.eye(nparam) - M) @ xb_prior
     
-        Pf = P_prior + Q
+        Pf = M_trans @ Pa @ M_trans.T + (np.eye(nparam) - M_trans) @ P_prior @ (np.eye(nparam) - M_trans).T + Q
+        # Pf = M_trans @ Pa @ M_trans.T + (np.eye(nparam) - M_trans**2) @ P_prior + Q
 
         xouts_median[:,t] = xa[:config.nbasis]
         xouts_sigma[:,t] = np.diag(Pa)[:config.nbasis]**0.5
@@ -273,15 +304,15 @@ def mx_kalmanfilter(config: InversionIntermediate):
             xouts_95[:, 1, t] = xouts_mu[:,t] + 2*xouts_sigma[:,t]
             
             xouts_mode[:,t] = xouts_mu[:,t]
-
+            
         elif config.xprior["pdf"] == "lognormal":
-
+            
             xouts_stdev[:,t] = ((np.exp(xouts_sigma[:,t]**2) - 1) * np.exp(2*xouts_mu[:,t] + xouts_sigma[:,t]**2))**0.5
             xouts_mean[:,t] = np.exp(xouts_mu[:,t] + 0.5*xouts_sigma[:,t]**2)
             
             xouts_68[:, 0, t] = np.exp(xouts_mu[:,t] - xouts_sigma[:,t])
             xouts_68[:, 1, t] = np.exp(xouts_mu[:,t] + xouts_sigma[:,t])
-
+            
             xouts_95[:, 0, t] = np.exp(xouts_mu[:,t] - 2*xouts_sigma[:,t])
             xouts_95[:, 1, t] = np.exp(xouts_mu[:,t] + 2*xouts_sigma[:,t])
             
@@ -292,7 +323,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
             bcouts_median[:,t] = xa[config.nbasis:]
             bcouts_sigma[:,t] = np.diag(Pa)[config.nbasis:]**0.5
             bcouts_mu[:,t] = xa_mu[config.nbasis:]
-
+            
             if config.bcprior["pdf"] == "normal":
                 
                 bcouts_stdev[:,t] = bcouts_sigma[:,t]
@@ -307,18 +338,18 @@ def mx_kalmanfilter(config: InversionIntermediate):
                 bcouts_mode[:,t] = bcouts_mu[:,t]
 
             elif config.bcprior["pdf"] == "lognormal":
-
+                
                 bcouts_stdev[:,t] = ((np.exp(bcouts_sigma[:,t]**2) - 1) * np.exp(2*bcouts_mu[:,t] + bcouts_sigma[:,t]**2))**0.5
                 bcouts_mean[:,t] = np.exp(bcouts_mu[:,t] + 0.5*bcouts_sigma[:,t]**2)
                 
                 bcouts_68[:, 0, t] = np.exp(bcouts_mu[:,t] - bcouts_sigma[:,t])
                 bcouts_68[:, 1, t] = np.exp(bcouts_mu[:,t] + bcouts_sigma[:,t])
-
+                
                 bcouts_95[:, 0, t] = np.exp(bcouts_mu[:,t] - 2*bcouts_sigma[:,t])
                 bcouts_95[:, 1, t] = np.exp(bcouts_mu[:,t] + 2*bcouts_sigma[:,t])
                 
                 bcouts_mode[:,t] = np.exp(bcouts_mu[:,t] - bcouts_sigma[:,t]**2)
-
+                
             Ymod_dic[t] = H @ np.append(xouts_mode[:,t], bcouts_mode[:,t])
             Ymodbc_dic[t] = config.Hbc_dic[t] @ bcouts_mode[:,t]
 
@@ -375,6 +406,8 @@ class PostProcessInput:
     Hbc_dic: dict | None = None
     use_bc: bool = False
     fixed_model_error: float | int | None = None
+    kappa_x: float | None = None
+    kappa_bc: float | None = None
 
 
 def mxkf_outs_trace(
@@ -770,6 +803,12 @@ def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         outds.YaprioriBC.attrs["longname"] = "a priori simulated boundary conditions"
         outds.YmodBC.attrs["longname"] = "mean of posterior simulated boundary conditions"
         outds.bcsensitivity.attrs["longname"] = "boundary conditions sensitivity timeseries"
+        
+        if config.kappa_bc is not None:
+            outds.attrs["BC Kappa"] = config.kappa_bc
+
+    if config.kappa_x is not None:
+        outds.attrs["X Kappa"] = config.kappa_x
 
     outds.attrs["Fixed model error"] = config.fixed_model_error
     outds.attrs["Start date"] = config.start_date
