@@ -154,6 +154,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
             raise ValueError(f"BC prior must be normal or lognormal for mxkf. {config.bcprior["pdf"]} invalid.")
         
         bcb = np.ones(4) * bcprior_median
+        bcb_mu = np.ones(4) * config.bcprior["mu"]
 
         print(f"Buidling mxkf with {config.bcprior["pdf"]} boundary condition uncertainties.")
 
@@ -186,6 +187,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
     print(f"Buidling mxkf with {config.xprior["pdf"]} emissions uncertainties.")
 
     xb = np.ones(config.nbasis) * xprior_median
+    xb_mu = np.ones(config.nbasis) * config.xprior["mu"]
     xa = np.zeros(nparam)
 
     periods = np.arange(config.nperiod)
@@ -212,6 +214,7 @@ def mx_kalmanfilter(config: InversionIntermediate):
             H = np.hstack((config.H_dic[t], config.Hbc_dic[t]))
             if t == 0:
                 xb = np.append(xb, bcb)
+                xb_mu = np.append(xb_mu, bcb_mu)
             
             if config.bcprior["pdf"] == "normal":
                 Wb_bc = np.ones(4)
@@ -240,25 +243,12 @@ def mx_kalmanfilter(config: InversionIntermediate):
         
         if t == 0:
             Pf = P_prior
-            xb_prior = xb
+            xb_mu_prior = xb_mu
 
         K = Pf @ H_hat.T @ woodbury(R_inv, H_hat, Pf, H_hat.T)
         # K = Pf @ H_hat.T @ np.linalg.inv(H_hat @ Pf @ H_hat.T + R)
-
-        if config.xprior["pdf"] == "normal":
-            xb_mu = xb[:config.nbasis]
-        elif config.xprior["pdf"] == "lognormal":
-            xb_mu = np.log(xb[:config.nbasis])
-
-        if config.use_bc:
-            if config.bcprior["pdf"] == "normal":
-                bc_mu = xb[config.nbasis:]
-            elif config.bcprior["pdf"] == "lognormal":
-                bc_mu = np.log(xb[config.nbasis:])
-
-            xb_mu = np.append(xb_mu, bc_mu)
         
-        ## xb_step here represents the Gaussian converted xb vector. That is, the lognormal components of xb are converted to log space.
+        ## xb_mu here represents the Gaussian converted xb vector. That is, the lognormal components of xb are converted to log space.
 
         xa_mu = xb_mu + K @ (Y - H @ xb)
 
@@ -279,14 +269,27 @@ def mx_kalmanfilter(config: InversionIntermediate):
 
         Pa = (np.eye(nparam) - K @ H_hat) @ Pf
 
-        # print(f"{t} - Condition of R_inv: {round(np.linalg.cond(R_inv),2)}, H_hat: {round(np.linalg.cond(H_hat),2)}, Pf: {round(np.linalg.cond(Pf),2)}, Pf_inv + H_hat.T @ R_inv @ H_hat: {round(np.linalg.cond(np.linalg.inv(Pf) + H_hat.T@R_inv@H_hat),2)}")
-        # Pf = Pa + Q
-
-        xb = M @ xa + (np.eye(nparam) - M) @ xb_prior
+        xb_mu = M_trans @ xa_mu + (np.eye(nparam) - M_trans) @ xb_mu_prior
     
         Pf = M_trans @ Pa @ M_trans.T + (np.eye(nparam) - M_trans) @ P_prior @ (np.eye(nparam) - M_trans).T + Q
-        # Pf = M_trans @ Pa @ M_trans.T + (np.eye(nparam) - M_trans**2) @ P_prior + Q
 
+        if config.xprior["pdf"] == "normal":
+            xb = xb_mu[:config.nbasis]
+        elif config.xprior["pdf"] == "lognormal":
+            xb = np.exp(xb_mu[:config.nbasis])
+        else:
+            raise ValueError("xprior 'pdf' must be either 'normal' or 'lognormal' for mxkf")
+
+        if config.use_bc:
+            if config.bcprior["pdf"] == "normal":
+                bcb = xb_mu[config.nbasis:]
+            elif config.bcprior["pdf"] == "lognormal":
+                bcb = np.exp(xb_mu[config.nbasis:])
+            else:
+                raise ValueError("bcprior 'pdf' must be either 'normal' or 'lognormal' for mxkf")
+
+            xb = np.append(xb, bcb)
+            
         xouts_median[:,t] = xa[:config.nbasis]
         xouts_sigma[:,t] = np.diag(Pa)[:config.nbasis]**0.5
         xouts_mu[:,t] = xa_mu[:config.nbasis]
@@ -441,36 +444,6 @@ def mxkf_outs_trace(
 
     return xtrace, nsamples
 
-
-# def mean_mode_fudge(
-#         xouts_mode: np.ndarray, 
-#         xouts_sigma: np.ndarray
-#         ):
-    
-#     """
-#     Function calculates the mu of a new lognormal distribution, which is defined with a mean equal to the mode of our posterior.
-#     """
-
-#     new_mu = np.log(xouts_mode) - 0.5 * xouts_sigma**2
-
-#     new_mean = np.exp(new_mu + 0.5 * xouts_sigma**2)
-
-#     new_median = np.exp(new_mu)
-
-#     new_mode = np.exp(new_mu - xouts_sigma**2)
-    
-#     new_stdev = ((np.exp(xouts_sigma**2) - 1) * np.exp(2*new_mu + xouts_sigma**2))**0.5
-
-#     new_68 = np.zeros((new_mu.shape[0], 2, new_mu.shape[1]))
-#     new_95 = np.zeros_like(new_68)
-
-#     new_68[:, 0, :] = np.exp(new_mu - xouts_sigma)
-#     new_68[:, 1, :] = np.exp(new_mu + xouts_sigma)
-
-#     new_95[:, 0, :] = np.exp(new_mu - 2*xouts_sigma)
-#     new_95[:, 1, :] = np.exp(new_mu + 2*xouts_sigma)
-
-#     return new_mu, new_mean, new_median, new_mode, new_stdev, new_68, new_95
 
 
 def mxkf_postprocessouts(config: PostProcessInput) -> xr.Dataset:

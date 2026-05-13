@@ -87,7 +87,7 @@ def lognormal_median_stdev(median_lognormal: float,
     with the given median and stdev.
 
     Args:
-        median: desired mode of log normal
+        median: desired median of log normal
         stdev: desired standard deviation of log normal
 
     Returns:
@@ -96,13 +96,17 @@ def lognormal_median_stdev(median_lognormal: float,
     Formulas for mu and var:
 
     mu = ln(median_y)
-    stdev ** 2 = ln((1 + sqrt(1 + 4 * stdev_y^2 / median_y)) / 2)
+    stdev ** 2 = ln((1 + sqrt(1 + 4 * stdev_y^2 / median_y^2)) / 2)
     
     """
 
     mu = np.log(median_lognormal)
 
-    sigma = 0.5 * np.log((1 + (1 + 4 * stdev_lognormal**2 / median_lognormal)**0.5) / 2)
+    ratio = (stdev_lognormal / median_lognormal) ** 2
+    y = (1 + np.sqrt(1 + 4 * ratio)) / 2
+
+    sigma = np.sqrt(np.log(y))
+    # sigma = 0.5 * np.log(y)
 
     return mu, sigma
 
@@ -113,7 +117,7 @@ def covariance_lognormal_transform(covariance_lognormal: np.ndarray,
                                    ) -> tuple[np.ndarray, np.ndarray]:
 
     """
-    Takes the covariance matrix of a lognormal distribution, the mean and stdev of the underlying normal distribution 
+    Takes the covariance matrix of a lognormal distribution (in natural space), the mean and stdev of the underlying normal distribution 
     and outputs the covariance and precision matrices of the underlying normal distribution.
 
     Equations:
