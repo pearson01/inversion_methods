@@ -111,6 +111,64 @@ def lognormal_median_stdev(median_lognormal: float,
     return mu, sigma
 
 
+def state_vector_mu_transform(z_mu, xprior, bcprior, rprior, nbasis, nbc):
+
+    """
+    Takes the fully Gaussian state vector and transforms to natural space. Lognormal parameters exponentiated to get the natural median. Gaussian parameters left the same.
+
+    Assumes z_mu = [[x_mu], [x_bc_mu], [x_r_mu]]
+
+    """
+
+    z = np.zeros_like(z_mu)
+
+    def transform(segment, prior):
+        if prior["pdf"] == "lognormal":
+            return np.exp(segment)
+        elif prior["pdf"] == "normal":
+            return segment
+        else:
+            print(f"Mate this {prior['pdf']} pdf nonsense is freaking me out")
+            return segment
+
+    # Apply to each block
+    z[:nbasis] = transform(z_mu[:nbasis], xprior)
+
+    if nbc:
+        z[nbasis:nbasis+nbc] = transform(z_mu[nbasis:nbasis+nbc], bcprior)
+
+    z[-1] = transform(z_mu[-1], rprior)
+
+    return z
+
+
+
+def build_Wb(zf, xprior, bcprior, rprior, nbasis, nbc):
+
+
+    def Wb(segment, prior):
+        if prior["pdf"] == "lognormal":
+            return segment
+        elif prior["pdf"] == "normal":
+            return np.ones_like(segment)
+        else:
+            print(f"Mate this {prior['pdf']} pdf nonsense is freaking me out")
+            return segment
+
+    Wb_x = Wb(zf[:nbasis], xprior)
+
+    if nbc:
+        Wb_bc = Wb(zf[nbasis:nbasis+nbc], bcprior)
+        Wb_x = np.append(Wb_x, Wb_bc)    
+
+    Wb_r = Wb(zf[-1:], rprior)
+
+    Wb = np.diag(np.append(Wb_x, Wb_r))
+
+    return Wb
+
+
+
 def covariance_lognormal_transform(covariance_lognormal: np.ndarray,
                                    mean_normal: float,
                                    stdev_normal: float,
