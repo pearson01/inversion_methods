@@ -137,6 +137,7 @@ def haffbs_function(config: InversionParameters):
                                      kappa_x_prior=config.kappa_x_prior,
                                      iterations=config.iterations,
                                      Hbc=Hbc,
+                                     use_bc = config.use_bc
                                      )
     
 
@@ -148,14 +149,26 @@ def haffbs_function(config: InversionParameters):
 
     start_haffbs = time.time()
 
+    if config.use_bc:
+        
+        (xtrace, 
+        bctrace, 
+        rtrace, 
+        var_rep_trace, 
+        var_qx_trace, 
+        kappatrace
+        ) = augmented_ffbs_mxkf_gibbs_double_slice(inversion_input)
+    
+    else:
+        
+        (xtrace, 
+        rtrace, 
+        var_rep_trace, 
+        var_qx_trace, 
+        kappatrace
+        ) = augmented_ffbs_mxkf_gibbs_double_slice(inversion_input)
 
-    (xtrace, 
-     bctrace, 
-     rtrace, 
-     var_rep_trace, 
-     var_qx_trace, 
-     kappatrace
-     ) = augmented_ffbs_mxkf_gibbs_double_slice(inversion_input)
+        bctrace = None
     
     end_haffbs = time.time()
 

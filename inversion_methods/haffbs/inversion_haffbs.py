@@ -8,7 +8,7 @@ from pandas import date_range, to_datetime
 from dataclasses import dataclass
 
 
-from inversion_methods.haffbs.affbs import augmented_mxkf, augmented_backward_sampler, amxkf_inputs, build_Pz
+from inversion_methods.haffbs.affbs import augmented_mxkf, augmented_backward_sampler, amxkf_inputs, build_Pz, augmented_forecast_jacobian
 from inversion_methods.haffbs.hierarchical_samplers import sample_sigma2_rep, sample_sigma2_qx, sample_kappa, kappa_max
 
 from openghg_inversions import utils, convert
@@ -37,6 +37,7 @@ class MessyInput:
     kappa_x_prior: dict
     iterations: int
     Hbc: np.ndarray | None = None
+    use_bc: bool = False
 
 
 @dataclass
@@ -79,7 +80,7 @@ def haffbs_monthly_dictionaries(config: MessyInput) -> InversionInput:
     Ymonth = to_datetime(config.Ytime).to_period("M")
     nperiod = len(allmonth)
 
-    if config.bcprior["pdf"]:
+    if config.use_bc:
         nbc = config.Hbc.shape[0]
         # bc_count = np.arange(0, nbc, nperiod)
         Hbc_dic = {}
@@ -97,7 +98,7 @@ def haffbs_monthly_dictionaries(config: MessyInput) -> InversionInput:
         Ytime_dic[period] = config.Ytime[mnthloc]
         Hx_dic[period] = config.Hx.T[mnthloc, :]
         siteindicator_dic[period] = config.siteindicator[mnthloc]
-        if nbc:
+        if config.use_bc:
             # Hbc_dic[period] = config.Hbc.T[np.ix_(mnthloc, bc_count)]
             Hbc_dic[period] = config.Hbc.T[mnthloc, :]
             Hz_dic[period] = np.hstack((Hx_dic[period], Hbc_dic[period]))
@@ -182,27 +183,32 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
     else:
 
         bctrace = None
+        bcprior_sigma2 = None
    
 
     zprior_mus = np.concatenate((xprior_mus, rprior_mus))
 
-    sigma_obs = np.concatenate(list(config.sigma_obs_dic.values()))
+    # sigma_obs = np.concatenate(list(config.sigma_obs_dic.values()))
+    sigma_obs = np.concatenate([config.sigma_obs_dic[t] for t in range(config.nperiod)])
 
     # Initial guesses
-    sigma2_rep_current = 1.01
+    sigma2_rep_current = 1000
     
-    sigma2_qx_current = 0.2
+    # sigma2_qx_current = 0.01
+    sigma2_qx_current = np.ones(config.nbasis) * 0.01
 
     sigma2_qr = config.sigma_qr**2
     sigma2_qrs = np.ones(1) * sigma2_qr
 
     kappa_x_current = 0.5
+    # kappa_x_current = 0
     kappa_x_max = kappa_max(config.nperiod, 1)
 
     xtrace = np.zeros((config.iterations, config.nperiod,  config.nbasis))
     rtrace = np.zeros((config.iterations, config.nperiod, 1))
     var_rep_trace = np.zeros(config.iterations)
     var_qx_trace = np.zeros(config.iterations)
+    # var_qx_trace = np.zeros((config.iterations, config.nbasis))
     kappatrace = np.zeros(config.iterations)
 
 
@@ -211,21 +217,25 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         # if i > 0 and i % 100 == 0:
         #     print(f"Gibbs iteration {i}", flush=True)
         
+        # xprior_sigma2 = ((sigma2_qx_current + sigma2_qr) / (1-kappa_x_current**2))
+        xprior_sigma2 = xprior_sigma**2
         # xprior_sigma2 = (sigma2_qx_current / (1-kappa_x_current**2))
-        # xprior_sigma2s = np.ones(config.nbasis) * xprior_sigma2
-        # xprior_sigma2s = np.ones(config.nbasis) * xprior_sigma**2
+        xprior_sigma2s = np.ones(config.nbasis) * xprior_sigma2
         
+        F_aug = augmented_forecast_jacobian(kappa_x_current, config.nbasis, config.nbc)
+
         sigma2_qxs = np.ones(config.nbasis) * sigma2_qx_current
+        # sigma2_qxs = sigma2_qx_current
 
         if config.nbc:
-            # xprior_sigma2s = np.concatenate((xprior_sigma2s, bcprior_sigma2s))
+            xprior_sigma2s = np.concatenate((xprior_sigma2s, bcprior_sigma2s))
             sigma2_qxs = np.concatenate((sigma2_qxs, sigma2_qbcs))
 
         
-        # zprior_sigma2s = np.concatenate((xprior_sigma2s, rprior_sigma2s))
-        # zprior_covariance = np.diag(zprior_sigma2s)
+        zprior_sigma2s = np.concatenate((xprior_sigma2s, rprior_sigma2s))
+        zprior_covariance = np.diag(zprior_sigma2s)
         
-        zprior_covariance = build_Pz(rprior_sigma2, bcprior_sigma2, sigma2_qx_current, sigma2_qr, kappa_x_current, config.nbasis, config.nbc)
+        # zprior_covariance = build_Pz(rprior_sigma2, bcprior_sigma2, sigma2_qx_current, sigma2_qr, kappa_x_current, config.nbasis, config.nbc)
 
         sigma2_qzs = np.concatenate((sigma2_qxs, sigma2_qrs))   # forecast noise all centred on zero
 
@@ -241,6 +251,7 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
                                      nperiod=config.nperiod,
                                      sigma_rep=sigma2_rep_current**0.5,
                                      kappa_x=kappa_x_current,
+                                     F_aug=F_aug,
                                      xprior=config.xprior,
                                      bcprior=config.bcprior,
                                      rprior=config.rprior,
@@ -250,53 +261,8 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         sampler_inputs = augmented_mxkf(filter_inputs)
 
         # zmusample, zsample = augmented_sampler(za_mu, Pa, zf_mu, Pf, F, nt)
+        # zmusample, zsample, state_residuals = augmented_backward_sampler(sampler_inputs)
         zmusample, zsample, state_residuals = augmented_backward_sampler(sampler_inputs)
-
-
-
-
-        # # --- DIAGNOSTICS START (temporary, remove after debug) ---
-        # try:
-        #     print("---DIAG--- iter", i, flush=True)
-        #     # sigma_obs summary (global)
-        #     print("sigma_obs min/med/max:", np.nanmin(sigma_obs), np.nanmedian(sigma_obs), np.nanmax(sigma_obs), flush=True)
-
-        #     # zmusample / zsample summaries (pre/post-transform)
-        #     if zmusample is not None:
-        #         zmus_x = zmusample[:, :config.nbasis].ravel()
-        #         print("zmusample bf percentiles (1/50/99):", np.percentile(zmus_x, [1,50,99]), flush=True)
-        #     if zsample is not None:
-        #         zsample_x = zsample[:, :config.nbasis].ravel()
-        #         print("zsample bf percentiles (1/50/99):", np.percentile(zsample_x, [1,50,99]), flush=True)
-
-        #     # state residuals
-        #     if state_residuals is not None and len(state_residuals) > 0:
-        #         print("state_residuals percentiles (1/50/99):", np.percentile(state_residuals, [1,50,99]), flush=True)
-        #         print("state_residuals any NaN/inf:", np.isnan(state_residuals).any(), np.isinf(state_residuals).any(), flush=True)
-
-        #     # Pf conditioning (if available on sampler_inputs)
-        #     if hasattr(sampler_inputs, "Pf") and sampler_inputs.Pf is not None:
-        #         try:
-        #             eigs = np.linalg.eigvalsh(sampler_inputs.Pf[-1])
-        #             print("Pf[-1] eig min/max:", eigs[0], eigs[-1], flush=True)
-        #         except Exception as _e:
-        #             print("Pf eigvals error:", _e, flush=True)
-
-        #     # hyperparameters
-        #     print("hyperparams sigma2_qx_current, kappa_x_current:", sigma2_qx_current, kappa_x_current, flush=True)
-
-        #     # quick derived prior-variance check (if you use AR(1) form)
-        #     try:
-        #         denom = (1.0 - kappa_x_current**2)
-        #         print("derived xprior_sigma2 (if AR1):", sigma2_qx_current / denom if denom > 0 else np.inf, flush=True)
-        #     except Exception as _e:
-        #         print("derived xprior_sigma2 error:", _e, flush=True)
-
-        # except Exception as e:
-        #     print("DIAGNOSTIC ERROR:", e, flush=True)
-        # # --- DIAGNOSTICS END ---
-
-
 
         xtrace[i] = zsample[:,:config.nbasis]
         
@@ -311,16 +277,32 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         
         var_rep_trace[i] = sigma2_rep_current
 
-        sigma2_qx_current = sample_sigma2_qx(zmusample, kappa_x_current, sigma2_qx_aprior, sigma2_qx_bprior, config.nbasis)
+        # sigma2_qx_current = sample_sigma2_qx(zmusample, kappa_x_current, sigma2_qx_aprior, sigma2_qx_bprior, config.nbasis)
 
-        var_qx_trace[i] = (np.exp(sigma2_qx_current) - 1) * np.exp(sigma2_qx_current)
+        # var_qx_trace[i] = (np.exp(sigma2_qx_current) - 1) * np.exp(sigma2_qx_current)
         # var_qx_trace[i] = omega_sig2_current
 
         kappa_x_current = sample_kappa(zmusample, sigma2_qx_current, kappa_x_current, kappa_x_max, kappa_x_aprior, kappa_x_bprior, config.nbasis)
 
         kappatrace[i] = kappa_x_current
 
-    return xtrace[burn:], bctrace[burn:], rtrace[burn:], var_rep_trace[burn:], var_qx_trace[burn:], kappatrace[burn:]
+        # sigma2_rep_current = 400
+        
+        # var_rep_trace[i] = sigma2_rep_current
+
+        sigma2_qx_current = 0.01
+
+        var_qx_trace[i] = (np.exp(sigma2_qx_current) - 1) * np.exp(sigma2_qx_current)
+        # var_qx_trace[i] = omega_sig2_current
+
+        # kappa_x_current = 0.7
+
+        # kappatrace[i] = kappa_x_current
+
+    if config.nbc:
+        return xtrace[burn:], bctrace[burn:], rtrace[burn:], var_rep_trace[burn:], var_qx_trace[burn:], kappatrace[burn:]
+    else:
+        return xtrace[burn:], rtrace[burn:], var_rep_trace[burn:], var_qx_trace[burn:], kappatrace[burn:]
 
 
 @dataclass
@@ -344,7 +326,7 @@ class PostProcessInput:
     end_date: str
     outputname: str
     outputpath: str
-    emissions_name: str
+    emissions_name: list[str]
     fp_data: dict
     country_file: str
     nbasis: int
@@ -603,6 +585,7 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "rtrace": (["stepnum", "period", "r"], config.rtrace),
         "var_rep_trace": (["stepnum"], config.var_rep_trace),
         "var_qx_trace": (["stepnum"], config.var_qx_trace),
+        # "var_qx_trace": (["stepnum", "bf"], config.var_qx_trace),
         "kappatrace": (["stepnum"], config.kappatrace),
         "siteindicator": (["nmeasure"], siteindicator),
         "sitenames": (["nsite"], config.sites),

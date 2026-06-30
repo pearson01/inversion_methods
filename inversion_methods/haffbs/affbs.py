@@ -29,9 +29,9 @@ class amxkf_inputs:
     zprior_covariance: np.ndarray
     forecast_noise: np.ndarray
     nperiod: int
-    nbasis: int
     sigma_rep: float
     kappa_x: float
+    F_aug: np.ndarray
     xprior: dict
     bcprior: dict
     rprior: dict
@@ -45,6 +45,7 @@ class abs_inputs:
     za_mu: np.ndarray
     Pa: np.ndarray
     kappa_x: float
+    F_aug: np.ndarray
     nperiod: int
     Y_dic: dict
     Hz_dic: dict
@@ -98,17 +99,6 @@ def augmented_forecast_model(z_mu, P_aug, kappa_x, Q_aug, nbasis, nbc):
     P_rx = P_aug[ir, ix]
     P_rr = P_aug[ir, ir]
 
-    if nbc:
-
-        ibc = slice(nbasis, nbasis + nbc)
-
-        zf_mu[ibc] = z_mu[ibc]
-
-        P_xbc = P_aug[ix, ibc]
-        P_bcbc = P_aug[ibc, ibc]
-        P_bcr = P_aug[ibc, ir]
-        P_rbc = P_aug[ir, ibc]
-
     # P_xx
     P_xx_new = kappa_x**2 * P_xx
 
@@ -139,40 +129,19 @@ def augmented_forecast_model(z_mu, P_aug, kappa_x, Q_aug, nbasis, nbc):
 
     if nbc:
 
-        # # P_xbc
-        # P_xbc_new = kappa_x * P_xbc
-        # P_bcx_new = P_xbc_new.T
+        ibc = slice(nbasis, nbasis + nbc)
 
-        # # P_bcbc
-        # P_bcbc_new = P_bcbc.copy()
-        
-        # # P_bcr
-        # P_bcr_new = P_bcr
-        # P_rbc_new = P_rbc
+        zf_mu[ibc] = np.ones(nbc)
 
-        # # Add Q
-        # P_bcbc_new[np.diag_indices(nbc)] += Q_aug[ibc]
-
-        # Pf_aug[ibc, ix] = P_bcx_new
-        # Pf_aug[ibc, ibc] = P_bcbc_new
-        # Pf_aug[ix, ibc] = P_xbc_new
-        # Pf_aug[ibc, ir] = P_bcr_new
-        # Pf_aug[ir, ibc] = P_rbc_new
-
-
-        # P_xbc
-        P_xbc_new = kappa_x * P_xbc + (1 - kappa_x) * P_rbc[None, :]
+        P_xbc_new = np.zeros((nbasis, nbc))
         P_bcx_new = P_xbc_new.T
 
         # P_bcbc
-        P_bcbc_new = P_bcbc.copy()
+        P_bcbc_new = np.diag(Q_aug[ibc])
         
         # P_bcr
-        P_bcr_new = P_bcr
-        P_rbc_new = P_rbc
-
-        # Add Q
-        P_bcbc_new[np.diag_indices(nbc)] += Q_aug[ibc]
+        P_bcr_new = np.zeros(nbc)
+        P_rbc_new = np.zeros(nbc)
 
         Pf_aug[ibc, ix] = P_bcx_new
         Pf_aug[ibc, ibc] = P_bcbc_new
@@ -181,7 +150,45 @@ def augmented_forecast_model(z_mu, P_aug, kappa_x, Q_aug, nbasis, nbc):
         Pf_aug[ir, ibc] = P_rbc_new
 
 
+    Pf_aug = 0.5 * (Pf_aug + Pf_aug.T)
+
     return zf_mu, Pf_aug
+    
+
+def augmented_forecast_jacobian(kappa, nbasis, nbc):
+    
+    M = np.eye(nbasis) * kappa
+    
+    B = np.ones((nbasis,1)) * (1-kappa)
+    Ir = np.eye(1)
+
+    zero_rx = np.zeros((1, nbasis))
+
+    if nbc is not None:
+        zero_xbc = np.zeros((nbasis, nbc))
+        zero_bcx = np.zeros((nbc, nbasis))
+        Ibc = np.eye(nbc)
+        zero_bcr = np.zeros((nbc, 1))
+        zero_rbc = np.zeros((1, nbc))
+        
+
+        return np.block([[M, zero_xbc, B], [zero_bcx, Ibc, zero_bcr], [zero_rx, zero_rbc, Ir]])
+    
+    else:
+
+        return np.block([[M, B], [zero_rx, Ir]])
+
+
+
+# def slow_augmented_forecast_model(z_mu, P_aug, F_aug, Q_aug):
+    
+#     zf_mu = F_aug @ z_mu
+
+#     Pf_aug = F_aug @ P_aug @ F_aug.T + Q_aug
+
+#     Pf_aug = 0.5 * (Pf_aug + Pf_aug.T)
+
+#     return zf_mu, Pf_aug
 
 
 
@@ -244,6 +251,8 @@ def augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
     za_mu = np.zeros((config.nperiod, nz))
     Pa = np.zeros((config.nperiod, nz, nz))
 
+    # Q_aug = np.diag(config.forecast_noise)
+
     for t in range(config.nperiod):
         H = config.Hz_dic[t]
         Y = config.Y_dic[t]
@@ -256,6 +265,7 @@ def augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
             Pa[-1] = config.zprior_covariance
 
         zf_mu[t], Pf[t] = augmented_forecast_model(za_mu[t-1], Pa[t-1], config.kappa_x, config.forecast_noise, config.nbasis, config.nbc)
+        # zf_mu[t], Pf[t] = slow_augmented_forecast_model(za_mu[t-1], Pa[t-1], config.F_aug, Q_aug)
 
         zf = state_vector_mu_transform(zf_mu[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
 
@@ -284,6 +294,7 @@ def augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
                          za_mu=za_mu,
                          Pa=Pa,
                          kappa_x=config.kappa_x,
+                         F_aug=config.F_aug,
                          nperiod=config.nperiod,
                          Y_dic=config.Y_dic,
                          Hz_dic=config.Hz_dic,
@@ -291,7 +302,7 @@ def augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
                          nbc=config.nbc,
                          xprior=config.xprior,
                          bcprior=config.bcprior,
-                         rprior=config.rprior
+                         rprior=config.rprior,
                          )
 
 
@@ -456,189 +467,368 @@ def augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
 
 
 
-def conditional_samples(mean_t, cov_t, ix, ibc, ir):
-    """
-    Draw a conditional sample from a joint Gaussian using a projection method.
+# def conditional_samples(mean_t, cov_t, ix, ibc, ir):
+#     """
+#     Draw a conditional sample from a joint Gaussian using a projection method.
 
-    This version:
-      - uses a mathematically correct projection
-      - avoids explicit conditional covariance
-      - is robust to ill-conditioning
-    """
+#     This version:
+#       - uses a mathematically correct projection
+#       - avoids explicit conditional covariance
+#       - is robust to ill-conditioning
+#     """
 
-    # --- extract means ---
-    mu_x = mean_t[ix]
-    mu_r = mean_t[ir]
+#     # --- extract means ---
+#     mu_x = mean_t[ix]
+#     mu_r = mean_t[ir]
 
-    # --- extract covariances (robust shapes) ---
-    Sigma_xx = cov_t[ix, ix]
-    Sigma_xr = np.asarray(cov_t[ix, ir]).reshape(-1)
-    Sigma_rr = cov_t[ir, ir]
+#     # --- extract covariances (robust shapes) ---
+#     Sigma_xx = cov_t[ix, ix]
+#     Sigma_xr = np.asarray(cov_t[ix, ir]).reshape(-1)
+#     Sigma_rr = cov_t[ir, ir]
 
-    if Sigma_rr <= 0:
-        raise ValueError("Sigma_rr must be positive")
+#     if Sigma_rr <= 0:
+#         raise ValueError("Sigma_rr must be positive")
 
-    # --- build joint state (x [+ bc]) ---
-    if ibc is not None:
-        mu_bc = mean_t[ibc]
+#     # --- build joint state (x [+ bc]) ---
+#     if ibc is not None:
+#         mu_bc = mean_t[ibc]
 
-        mu_joint = np.concatenate([mu_x, mu_bc])
+#         mu_joint = np.concatenate([mu_x, mu_bc])
 
-        Sigma_bcbc = cov_t[ibc, ibc]
-        Sigma_bcx  = cov_t[ibc, ix]
-        Sigma_xbc  = cov_t[ix, ibc]
-        Sigma_bcr  = np.asarray(cov_t[ibc, ir]).reshape(-1)
+#         Sigma_bcbc = cov_t[ibc, ibc]
+#         Sigma_bcx  = cov_t[ibc, ix]
+#         Sigma_xbc  = cov_t[ix, ibc]
+#         Sigma_bcr  = np.asarray(cov_t[ibc, ir]).reshape(-1)
 
-        Sigma_joint = np.block([
-            [Sigma_xx,  Sigma_xbc],
-            [Sigma_bcx, Sigma_bcbc]
-        ])
+#         Sigma_joint = np.block([
+#             [Sigma_xx,  Sigma_xbc],
+#             [Sigma_bcx, Sigma_bcbc]
+#         ])
 
-        Sigma_joint_r = np.concatenate([Sigma_xr, Sigma_bcr])
+#         Sigma_joint_r = np.concatenate([Sigma_xr, Sigma_bcr])
 
-    else:
-        mu_joint = mu_x
-        Sigma_joint = Sigma_xx
-        Sigma_joint_r = Sigma_xr
+#     else:
+#         mu_joint = mu_x
+#         Sigma_joint = Sigma_xx
+#         Sigma_joint_r = Sigma_xr
 
-    # --- enforce symmetry early ---
-    Sigma_joint = 0.5 * (Sigma_joint + Sigma_joint.T)
+#     # --- enforce symmetry early ---
+#     Sigma_joint = 0.5 * (Sigma_joint + Sigma_joint.T)
 
-    n = len(mu_joint)
+#     n = len(mu_joint)
 
-    # --- build FULL joint covariance including r ---
-    Sigma_full = np.block([
-        [Sigma_joint,                Sigma_joint_r[:, None]],
-        [Sigma_joint_r[None, :],     np.array([[Sigma_rr]])]
-    ])
+#     # --- build FULL joint covariance including r ---
+#     Sigma_full = np.block([
+#         [Sigma_joint,                Sigma_joint_r[:, None]],
+#         [Sigma_joint_r[None, :],     np.array([[Sigma_rr]])]
+#     ])
 
-    mu_full = np.concatenate([mu_joint, [mu_r]])
+#     mu_full = np.concatenate([mu_joint, [mu_r]])
 
-    # symmetrise
-    Sigma_full = 0.5 * (Sigma_full + Sigma_full.T)
+#     # symmetrise
+#     Sigma_full = 0.5 * (Sigma_full + Sigma_full.T)
 
-    # --- sample full joint ---
-    try:
-        L = cholesky(Sigma_full + 1e-10 * np.eye(n + 1), lower=True)
+#     # --- sample full joint ---
+#     try:
+#         L = cholesky(Sigma_full + 1e-10 * np.eye(n + 1), lower=True)
 
-    except np.linalg.LinAlgError:
-        # eigenvalue repair
-        eigvals, eigvecs = np.linalg.eigh(Sigma_full)
-        eigvals = np.maximum(eigvals, 1e-12)
-        Sigma_full = eigvecs @ np.diag(eigvals) @ eigvecs.T
+#     except np.linalg.LinAlgError:
+#         # eigenvalue repair
+#         eigvals, eigvecs = np.linalg.eigh(Sigma_full)
+#         eigvals = np.maximum(eigvals, 1e-12)
+#         Sigma_full = eigvecs @ np.diag(eigvals) @ eigvecs.T
 
-        try:
-            L = cholesky(Sigma_full + 1e-10 * np.eye(n + 1), lower=True)
+#         try:
+#             L = cholesky(Sigma_full + 1e-10 * np.eye(n + 1), lower=True)
 
-        except np.linalg.LinAlgError:
-            warn("Cholesky failed — using SVD fallback")
+#         except np.linalg.LinAlgError:
+#             warn("Cholesky failed — using SVD fallback")
 
-            U, s, _ = np.linalg.svd(Sigma_full)
-            s = np.maximum(s, 0)
+#             U, s, _ = np.linalg.svd(Sigma_full)
+#             s = np.maximum(s, 0)
 
-            L = U @ np.diag(np.sqrt(s))
+#             L = U @ np.diag(np.sqrt(s))
 
-    z_unc = mu_full + L @ np.random.randn(n + 1)
+#     z_unc = mu_full + L @ np.random.randn(n + 1)
 
-    x_unc = z_unc[:-1]
-    r_unc = z_unc[-1]
+#     x_unc = z_unc[:-1]
+#     r_unc = z_unc[-1]
 
-    # --- independently sample the desired r_t ---
-    r_t = np.random.normal(mu_r, np.sqrt(Sigma_rr))
+#     # --- independently sample the desired r_t ---
+#     r_t = np.random.normal(mu_r, np.sqrt(Sigma_rr))
 
-    # --- correct projection (KEY FIX) ---
-    gain = Sigma_joint_r / Sigma_rr
+#     # --- correct projection (KEY FIX) ---
+#     gain = Sigma_joint_r / Sigma_rr
 
-    x_cond = x_unc + gain * (r_t - r_unc)
+#     x_cond = x_unc + gain * (r_t - r_unc)
 
-    # --- return combined state ---
-    return np.concatenate([x_cond, np.array([r_t])])
+#     # --- return combined state ---
+#     return np.concatenate([x_cond, np.array([r_t])])
 
 
 
-def augmented_backward_sampler(config=abs_inputs):
+# def augmented_backward_sampler(config: abs_inputs):
     
-    """
-    Mixed FFBS sampler:
-      - x_r (random walk) sampled directly from marginal MVN
-      - x sampled conditionally
-    No explicit F propagation to avoid inefficiencies of sparse matrices.
-    """
+#     """
+#     Mixed FFBS sampler:
+#       - x_r (random walk) sampled directly from marginal MVN
+#       - x sampled conditionally
+#     No explicit F propagation to avoid inefficiencies of sparse matrices.
+#     """
 
-    ix = slice(0, config.nbasis)
-    ir = -1
+#     ix = slice(0, config.nbasis)
+#     ir = -1
 
-    if config.nbc:
-        ibc = slice(config.nbasis, config.nbasis + config.nbc)
-    else:
-        ibc = None
+#     if config.nbc:
+#         ibc = slice(config.nbasis, config.nbasis + config.nbc)
+#     else:
+#         ibc = None
 
-    ones_x = np.ones(config.nbasis)
+#     ones_x = np.ones(config.nbasis)
+#     z_mu = np.zeros_like(config.za_mu)
+#     z = np.zeros_like(z_mu)
+
+#     z_mu[-1] = conditional_samples(config.za_mu[-1], config.Pa[-1], ix, ibc, ir)
+#     z[-1] = state_vector_mu_transform(z_mu[-1], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
+
+#     # Wb = np.diag(z[-1])
+#     # Wo_inv = np.eye(len(config.Y_dic[config.nperiod-1]))
+#     # H_hat = Wo_inv @ config.Hz_dic[config.nperiod-1] @ Wb
+
+#     # state_residuals = config.Y_dic[config.nperiod-1] - (H_hat @ z_mu[-1])
+#     state_residuals = config.Y_dic[config.nperiod-1] - (config.Hz_dic[config.nperiod-1] @ z[-1])
+
+#     for t in reversed(range(config.nperiod - 1)):
+        
+#         Pa = config.Pa[t]
+
+#         Pa_xx = Pa[ix, ix]
+#         Pa_xr = Pa[ix, ir]
+#         Pa_rx = Pa_xr.T
+#         Pa_rr = Pa[ir, ir]
+
+#         if config.nbc:
+
+#             Pa_bcx = Pa[ibc, ix]
+#             Pa_xbc = Pa_bcx.T
+#             Pa_bcr = Pa[ibc, ir]
+#             Pa_rbc = Pa_bcr.T
+#             Pa_bcbc = Pa[ibc, ibc]
+
+#         C = np.zeros_like(Pa)
+
+#         C[ix, ix] = config.kappa_x * Pa_xx + (1 - config.kappa_x) * np.outer(Pa_xr, ones_x)
+#         C[ix, ir] = Pa_xr
+#         C[ir, ix] = config.kappa_x * Pa_rx + (1 - config.kappa_x) * Pa_rr * ones_x
+#         C[ir, ir] = Pa_rr
+
+#         if config.nbc:
+
+#             C[ibc, ibc] = Pa_bcbc
+#             C[ibc, ix] = config.kappa_x * Pa_bcx
+#             C[ibc, ir] = Pa_bcr
+#             C[ix, ibc] = Pa_xbc
+#             C[ir, ibc] = Pa_rbc
+
+#         A = solve(config.Pf[t+1].T, C.T).T
+
+#         mean_t = config.za_mu[t] + A @ (z_mu[t+1] - config.zf_mu[t+1])
+#         cov_t  = config.Pa[t] - A @ config.Pf[t+1] @ A.T
+#         # cov_t = 0.5 * (cov_t + cov_t.T)
+
+#         z_mu[t] = conditional_samples(mean_t, cov_t, ix, ibc, ir)
+
+#         z[t] = state_vector_mu_transform(z_mu[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
+
+#         # Wb = build_Wb(z[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
+#         # Wo_inv = np.eye(len(config.Y_dic[t]))
+#         # H_hat = Wo_inv @ config.Hz_dic[t] @ Wb
+
+#         # resid = config.Y_dic[t] - (H_hat @ z_mu[t])
+
+#         resid = config.Y_dic[t] - (config.Hz_dic[t] @ z[t])
+#         state_residuals = np.concatenate([resid, state_residuals])
+
+#     return z_mu, z, state_residuals
+
+
+def slow_augmented_backward_sampler(config: abs_inputs):
+
     z_mu = np.zeros_like(config.za_mu)
     z = np.zeros_like(z_mu)
 
-    z_mu[-1] = conditional_samples(config.za_mu[-1], config.Pa[-1], ix, ibc, ir)
+    z_mu[-1] = np.random.multivariate_normal(config.za_mu[-1], config.Pa[-1])
+
     z[-1] = state_vector_mu_transform(z_mu[-1], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
 
-    # Wb = np.diag(z[-1])
-    # Wo_inv = np.eye(len(config.Y_dic[config.nperiod-1]))
-    # H_hat = Wo_inv @ config.Hz_dic[config.nperiod-1] @ Wb
-
-    # state_residuals = config.Y_dic[config.nperiod-1] - (H_hat @ z_mu[-1])
     state_residuals = config.Y_dic[config.nperiod-1] - (config.Hz_dic[config.nperiod-1] @ z[-1])
 
-    for t in reversed(range(config.nperiod - 1)):
-        
-        Pa = config.Pa[t]
+    for t in reversed(range(config.nperiod-1)):
 
-        Pa_xx = Pa[ix, ix]
-        Pa_xr = Pa[ix, ir]
-        Pa_rx = Pa_xr.T
-        Pa_rr = Pa[ir, ir]
+        # A = config.Pa[t] @ config.F_aug.T @ np.linalg.inv(config.Pf[t+1])
 
-        if config.nbc:
+        A = np.linalg.solve(config.Pf[t+1].T, (config.Pa[t] @ config.F_aug.T).T).T
 
-            Pa_bcx = Pa[ibc, ix]
-            Pa_xbc = Pa_bcx.T
-            Pa_bcr = Pa[ibc, ir]
-            Pa_rbc = Pa_bcr.T
-            Pa_bcbc = Pa[ibc, ibc]
-
-        C = np.zeros_like(Pa)
-
-        C[ix, ix] = config.kappa_x * Pa_xx + (1 - config.kappa_x) * np.outer(Pa_xr, ones_x)
-        C[ix, ir] = Pa_xr
-        C[ir, ix] = config.kappa_x * Pa_rx + (1 - config.kappa_x) * Pa_rr * ones_x
-        C[ir, ir] = Pa_rr
-
-        if config.nbc:
-
-            C[ibc, ibc] = Pa_bcbc
-            C[ibc, ix] = config.kappa_x * Pa_bcx
-            C[ibc, ir] = Pa_bcr
-            C[ix, ibc] = Pa_xbc
-            C[ir, ibc] = Pa_rbc
-
-        A = solve(config.Pf[t+1].T, C.T).T
-
-        mean_t = config.za_mu[t] + A @ (z_mu[t+1] - config.zf_mu[t+1])
+        mu_t = config.za_mu[t] + A @ (z_mu[t+1] - config.zf_mu[t+1])
         cov_t  = config.Pa[t] - A @ config.Pf[t+1] @ A.T
-        # cov_t = 0.5 * (cov_t + cov_t.T)
-
-        z_mu[t] = conditional_samples(mean_t, cov_t, ix, ibc, ir)
+        z_mu[t] = np.random.multivariate_normal(mu_t, cov_t)
 
         z[t] = state_vector_mu_transform(z_mu[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
-
-        # Wb = build_Wb(z[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
-        # Wo_inv = np.eye(len(config.Y_dic[t]))
-        # H_hat = Wo_inv @ config.Hz_dic[t] @ Wb
-
-        # resid = config.Y_dic[t] - (H_hat @ z_mu[t])
 
         resid = config.Y_dic[t] - (config.Hz_dic[t] @ z[t])
         state_residuals = np.concatenate([resid, state_residuals])
 
     return z_mu, z, state_residuals
+
+
+
+def augmented_backward_sampler(config: abs_inputs):
+
+    ix = slice(0, config.nbasis)
+    ir = -1
+    one = np.ones(config.nbasis)
+
+    z_mu = np.zeros_like(config.za_mu)
+    z = np.zeros_like(z_mu)
+
+    # --- sample final state ---
+    z_mu[-1] = np.random.multivariate_normal(config.za_mu[-1], config.Pa[-1])
+    z[-1] = state_vector_mu_transform(z_mu[-1], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
+
+    state_residuals = config.Y_dic[config.nperiod-1] - (config.Hz_dic[config.nperiod-1] @ z[-1])
+
+    for t in reversed(range(config.nperiod - 1)):
+
+        Pa_t = config.Pa[t]
+        Pf_tp1 = config.Pf[t+1]
+
+        # --- extract Pa blocks ---
+        P_xx = Pa_t[ix, ix]
+        P_xr = Pa_t[ix, ir]
+        P_rx = Pa_t[ir, ix]
+        P_rr = Pa_t[ir, ir]
+
+        if config.nbc:
+            ibc = slice(config.nbasis, config.nbasis + config.nbc)
+
+            P_xbc = Pa_t[ix, ibc]
+            P_bcx = Pa_t[ibc, ix]
+            P_bcbc = Pa_t[ibc, ibc]
+            P_bcr = Pa_t[ibc, ir]
+            P_rbc = Pa_t[ir, ibc]
+
+        # --- compute Pa @ F^T (blockwise) ---
+
+       
+        one = np.ones(config.nbasis)
+        b = (1 - config.kappa_x) * one
+
+        M1 = np.zeros_like(Pa_t)
+
+        # x rows
+        M1[ix, ix] = config.kappa_x * P_xx + np.outer(P_xr, b)
+        M1[ix, ir] = P_xr.copy()
+
+        # r row
+        M1[ir, ix] = config.kappa_x * P_rx + P_rr * b
+        M1[ir, ir] = P_rr
+
+        if config.nbc:
+            # M1[ix, ibc] = P_xbc
+
+            # M1[ibc, ix] = config.kappa_x * P_bcx + np.outer(P_bcr, b)
+            # M1[ibc, ibc] = P_bcbc
+            # M1[ibc, ir] = P_bcr.copy()
+
+            # M1[ir, ibc] = P_rbc
+
+            M1[ibc, ix] = config.kappa_x * P_bcx + np.outer(P_bcr, b)
+            M1[ibc, ir] = P_bcr.copy()
+
+        # --- solve for A without inversion ---
+        A = np.linalg.solve(Pf_tp1.T, M1.T).T
+
+        # --- RTS update ---
+        mu_t = config.za_mu[t] + A @ (z_mu[t+1] - config.zf_mu[t+1])
+        cov_t = Pa_t - A @ config.Pf[t+1] @ A.T
+        cov_t = 0.5 * (cov_t + cov_t.T)
+
+        z_mu[t] = np.random.multivariate_normal(mu_t, cov_t)
+        z[t] = state_vector_mu_transform(z_mu[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
+
+        resid = config.Y_dic[t] - (config.Hz_dic[t] @ z[t])
+        state_residuals = np.concatenate([resid, state_residuals])
+
+    return z_mu, z, state_residuals
+
+
+
+# def slow_augmented_backward_sampler(config: abs_inputs):
+    
+#     """
+#     FFBS backward sampler for augmented Kalman filter.
+
+#     Parameters
+#     ----------
+#     filtered_means : array (T, n)
+#         Kalman filtered means m_t
+
+#     filtered_covs : array (T, n, n)
+#         Kalman filtered covariances P_t
+
+#     F : array (n, n)
+#         State transition matrix
+
+#     Q : array (n, n)
+#         State innovation covariance
+
+#     Returns
+#     -------
+#     z_draws : array (T, n)
+#         Sample from p(z_1:T | y_1:T)
+#     """
+
+#     T, n = config.za_mu.shape
+
+#     zmu_draws = np.zeros((T, n))
+#     z_draws = np.zeros((T, n))
+
+#     # ---- draw final state ----
+#     mT = config.za_mu[-1]
+#     PT = config.Pa[-1]
+
+#     zmu_draws[-1] = np.random.multivariate_normal(mT, PT)
+#     z_draws[-1] = state_vector_mu_transform(zmu_draws[-1], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
+
+#     # ---- backward recursion ----
+#     for t in range(T - 2, -1, -1):
+
+#         mt = config.za_mu[t]
+#         Pt = config.Pa[t]
+
+#         # prediction for t+1
+#         a_next = config.F_aug @ mt
+#         R_next = config.F_aug @ Pt @ config.F_aug.T + config.Q_aug
+
+#         # smoother gain
+#         J = Pt @ config.F_aug.T @ np.linalg.inv(R_next)
+
+#         # conditional moments
+#         mean_smooth = mt + J @ (zmu_draws[t + 1] - a_next)
+
+#         cov_smooth = Pt - J @ R_next @ J.T
+
+#         # numerical symmetry
+#         cov_smooth = 0.5 * (cov_smooth + cov_smooth.T)
+
+#         # sample
+#         zmu_draws[t] = np.random.multivariate_normal(
+#             mean_smooth,
+#             cov_smooth
+#         )
+#         z_draws[t] = state_vector_mu_transform(zmu_draws[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
+
+#     return zmu_draws, z_draws
 
 
 

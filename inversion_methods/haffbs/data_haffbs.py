@@ -169,10 +169,13 @@ def extract_data(config: DataConfig):
     nbasis = Hx.shape[0]
 
     update_log_normal_prior(config.xprior)
-    update_log_normal_prior(config.bcprior)
     update_log_normal_prior(config.rprior)
 
-    Hbc = build_boundary_conditions(fp_data, config.sites, config)
+    if config.use_bc:
+        update_log_normal_prior(config.bcprior)
+        Hbc = build_boundary_conditions(fp_data, config.sites, config)
+    else:
+        Hbc = None
 
     return Hx, Y, Ytime, error, siteindicator, nbasis, config.xprior, config.bcprior, Hbc, fp_data
 

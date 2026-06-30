@@ -159,7 +159,7 @@ def build_Wb(zf, xprior, bcprior, rprior, nbasis, nbc):
 
     if nbc:
         Wb_bc = Wb(zf[nbasis:nbasis+nbc], bcprior)
-        Wb_x = np.append(Wb_x, Wb_bc)    
+        Wb_x = np.concatenate([Wb_x, Wb_bc])    
 
     Wb_r = Wb(zf[-1:], rprior)
 
@@ -219,7 +219,32 @@ def update_log_normal_prior(prior):
             del prior["stdev"]
             prior["mu"] = mu
             prior["sigma"] = sigma
-        elif "mu" and "sigma" in prior: 
+        elif "mu" in prior and "sigma" in prior: 
             pass
         else:
             raise ValueError("Incompatible combination of prior parameters.") 
+        
+
+
+def state_percentiles(mus, sigmas, prior, len):
+
+    outs_68 = np.zeros((2, len))
+    outs_95 = np.zeros((2, len))
+
+    if prior["pdf"] == "lognormal":
+
+        outs_68[0, :] = np.exp(mus - sigmas)
+        outs_68[1, :] = np.exp(mus + sigmas)
+        outs_95[0, :] = np.exp(mus - 2*sigmas)
+        outs_95[1, :] = np.exp(mus + 2*sigmas)
+
+    elif prior["pdf"] == "normal":
+        outs_68[0, :] = mus - sigmas
+        outs_68[1, :] = mus + sigmas
+        outs_95[0, :] = mus - 2*sigmas
+        outs_95[1, :] = mus + 2*sigmas
+    else:
+        raise ValueError(f"Mate this {prior['pdf']} pdf nonsense is freaking me out")
+    
+    return outs_68, outs_95
+

@@ -50,6 +50,11 @@ def sample_sigma2_rep(sigma2_rep_current, r2, sigma_obs, alpha_prior, beta_prior
 
     s_current = np.log(sigma2_rep_current)
 
+
+    if not np.isfinite(s_current):
+        raise ValueError("Current sigma2_rep has non-finite log posterior")
+
+
     logp = lambda s: sigma2_rep_log_posterior(s, r2, sigma_obs, alpha_prior, beta_prior)
 
     logy = logp(s_current) - np.random.exponential(1)
@@ -100,6 +105,14 @@ def sample_sigma2_qx(zmusample, kappa_x, alpha_prior, beta_prior, nbasis):
     shape = alpha_prior + 0.5 * x_innov.size
     scale = beta_prior + 0.5 * np.sum(x_innov**2)
 
+    # n_time = x_innov.shape[0]
+    # shape = alpha_prior + 0.5 * n_time
+    # scale = beta_prior + 0.5 * np.sum(x_innov**2, axis=0)
+
+    # if np.any(scale <= 0):
+    #     print(f"Encountered non-positive scale parameter: {scale}")
+    #     scale[np.where(scale <= 0)] = 1e-10  # Ensure positive scale
+
     sigma2_qx_sample = 1 / np.random.gamma(shape, 1/scale)
 
     return sigma2_qx_sample
@@ -122,79 +135,235 @@ def kappa_max(nperiod, c=2):
 
 
 
-def kappa_log_posterior(kappa_current, kappa_max, dev_curr, dev_prev, sigma2_qx, kappa_aprior, kappa_bprior):
-
+def kappa_log_posterior(
+    kappa_current,
+    kappa_max,
+    dev_curr,
+    dev_prev,
+    rmusample,
+    sigma2_qx,
+    kappa_aprior,
+    kappa_bprior
+):
     """
-    Generates a log-posterior value for a sample of kappa_x given samples of x and x_r.
+    Log-posterior for a scalar kappa_x with basis-specific sigma2_qx.
 
-    Compares current deviations of x from x_r to previous deviations of x from x_r. By doing this we can redefine the forecast model as an AR(1).
+    Parameters
+    ----------
+    kappa_current : float
+        Proposed scalar kappa value.
+    kappa_max : float
+        Upper bound for kappa.
+    dev_curr : ndarray, shape (T-1, nbasis)
+        Current deviations x_t - r_t
+    dev_prev : ndarray, shape (T-1, nbasis)
+        Previous deviations x_{t-1} - r_{t-1}
+    rmusample : ndarray, shape (T, 1) or (T,)
+        Relaxing mean trajectory
+    sigma2_qx : float or ndarray, shape (nbasis,)
+        Process noise variance(s) for x basis functions
+    kappa_aprior, kappa_bprior : float
+        Beta prior parameters
 
-    We have a standard Gaussian likelihood from the residuals and a beta prior.
-
+    Returns
+    -------
+    float
+        Log posterior up to an additive constant.
     """
 
     if kappa_current <= 0 or kappa_current >= kappa_max:
-        raise ValueError("Nahh bro")
-    
-    else:
+        return -np.inf
 
-        e = dev_curr - kappa_current * dev_prev
+    # ensure sigma2_qx is a vector
+    sigma2_qx = np.asarray(sigma2_qx, dtype=float)
+    if sigma2_qx.ndim == 0:
+        sigma2_qx = np.array([sigma2_qx])
 
-        ss = np.sum(e**2)
-        
-        loglik = -0.5 * ss / sigma2_qx
+    # residuals:
+    # e_t = dev_t - kappa * dev_{t-1} - (r_{t-1} - r_t)
+    drift = (rmusample[:-1] - rmusample[1:])  # shape (T-1, 1) or (T-1,)
+    if drift.ndim == 1:
+        drift = drift[:, None]
 
-        logprior = (kappa_aprior-1)*np.log(kappa_current) + (kappa_bprior-1)*np.log(1-kappa_current)
-        
-        return loglik + logprior
-    
+    e = dev_curr - kappa_current * dev_prev - drift
+
+    # weighted sum of squares:
+    # sum_j sum_t e[t,j]^2 / sigma2_qx[j]
+    inv_sigma2 = 1.0 / sigma2_qx
+    weighted_ss = np.einsum("tj,j->", e**2, inv_sigma2)
+
+    loglik = -0.5 * weighted_ss
+
+    # Beta prior on kappa over (0,1).
+    # If kappa_max < 1 and you want a proper Beta on (0, kappa_max),
+    # see note below.
+    logprior = ((kappa_aprior - 1) * np.log(kappa_current) +
+                (kappa_bprior - 1) * np.log(1 - kappa_current))
+
+    return loglik + logprior
 
 
-def sample_kappa(zmusample, sigma2_qx, kappa_current, kappa_max, kappa_aprior, kappa_bprior, nbasis, w=0.05, m=100):
 
+def sample_kappa(
+    zmusample,
+    sigma2_qx,
+    kappa_current,
+    kappa_max,
+    kappa_aprior,
+    kappa_bprior,
+    nbasis,
+    w=0.05,
+    m=100
+):
     """
-    Slice sampler generating samples from kappa_x given x, x_r, and sigma2_qx.
-
+    Slice sampler for a scalar kappa_x given x, r, and basis-specific sigma2_qx.
     """
 
-    xmusample = zmusample[:,:nbasis]
-    rmusample = zmusample[:,-1:]
+    xmusample = zmusample[:, :nbasis]
+    rmusample = zmusample[:, -1:]   # keep as (T,1) for broadcasting
 
     xmu_dev = xmusample - rmusample
 
     dev_prev = xmu_dev[:-1]
     dev_curr = xmu_dev[1:]
 
-    logy = kappa_log_posterior(kappa_current, kappa_max, dev_curr, dev_prev, sigma2_qx, kappa_aprior, kappa_bprior) + np.log(np.random.rand())
+    logy = (
+        kappa_log_posterior(
+            kappa_current, kappa_max,
+            dev_curr, dev_prev, rmusample,
+            sigma2_qx, kappa_aprior, kappa_bprior
+        )
+        + np.log(np.random.rand())
+    )
 
     u = np.random.rand()
-    L = kappa_current - w*u
+    L = kappa_current - w * u
     R = L + w
-    
+
     L = max(L, 0.0)
     R = min(R, kappa_max)
-    
-    j = int(np.floor(m*np.random.rand()))
-    k = (m-1) - j
-    
-    while j > 0 and L > 0.0 and kappa_log_posterior(L, kappa_max, dev_curr, dev_prev, sigma2_qx, kappa_aprior, kappa_bprior) > logy:
+
+    j = int(np.floor(m * np.random.rand()))
+    k = (m - 1) - j
+
+    while (
+        j > 0 and
+        L > 0.0 and
+        kappa_log_posterior(
+            L, kappa_max,
+            dev_curr, dev_prev, rmusample,
+            sigma2_qx, kappa_aprior, kappa_bprior
+        ) > logy
+    ):
         L = max(L - w, 0.0)
         j -= 1
-        
-    while k > 0 and R < kappa_max and kappa_log_posterior(R, kappa_max, dev_curr, dev_prev, sigma2_qx, kappa_aprior, kappa_bprior) > logy:
+
+    while (
+        k > 0 and
+        R < kappa_max and
+        kappa_log_posterior(
+            R, kappa_max,
+            dev_curr, dev_prev, rmusample,
+            sigma2_qx, kappa_aprior, kappa_bprior
+        ) > logy
+    ):
         R = min(R + w, kappa_max)
         k -= 1
-    
-    # Step 3: shrinkage
+
     while True:
         kappa_new = np.random.uniform(L, R)
-        if kappa_log_posterior(kappa_new, kappa_max, dev_curr, dev_prev, sigma2_qx, kappa_aprior, kappa_bprior) >= logy:
+
+        if (
+            kappa_log_posterior(
+                kappa_new, kappa_max,
+                dev_curr, dev_prev, rmusample,
+                sigma2_qx, kappa_aprior, kappa_bprior
+            ) >= logy
+        ):
             return kappa_new
-        
+
         if kappa_new < kappa_current:
             L = kappa_new
         else:
             R = kappa_new
+
+
+
+# def kappa_log_posterior(kappa_current, kappa_max, dev_curr, dev_prev, rmusample, sigma2_qx, kappa_aprior, kappa_bprior):
+
+#     """
+#     Generates a log-posterior value for a sample of kappa_x given samples of x and x_r.
+
+#     Compares current deviations of x from x_r to previous deviations of x from x_r. By doing this we can redefine the forecast model as an AR(1).
+
+#     We have a standard Gaussian likelihood from the residuals and a beta prior.
+
+#     """
+
+#     if kappa_current <= 0 or kappa_current >= kappa_max:
+#         print("Nahh bro, outside the realms of possibility for kappa")
+#         return -np.inf
+    
+#     else:
+
+#         # e = dev_curr - kappa_current * dev_prev
+#         e = dev_curr - kappa_current * dev_prev - (rmusample[:-1] - rmusample[1:])
+
+#         ss = np.sum(e**2)
+        
+#         loglik = -0.5 * ss / sigma2_qx
+
+#         logprior = (kappa_aprior-1)*np.log(kappa_current) + (kappa_bprior-1)*np.log(1-kappa_current)
+        
+#         return loglik + logprior
+    
+
+
+# def sample_kappa(zmusample, sigma2_qx, kappa_current, kappa_max, kappa_aprior, kappa_bprior, nbasis, w=0.05, m=100):
+
+#     """
+#     Slice sampler generating samples from kappa_x given x, x_r, and sigma2_qx.
+
+#     """
+
+#     xmusample = zmusample[:,:nbasis]
+#     rmusample = zmusample[:,-1:]
+
+#     xmu_dev = xmusample - rmusample
+
+#     dev_prev = xmu_dev[:-1]
+#     dev_curr = xmu_dev[1:]
+
+#     logy = kappa_log_posterior(kappa_current, kappa_max, dev_curr, dev_prev, rmusample, sigma2_qx, kappa_aprior, kappa_bprior) + np.log(np.random.rand())
+
+#     u = np.random.rand()
+#     L = kappa_current - w*u
+#     R = L + w
+    
+#     L = max(L, 0.0)
+#     R = min(R, kappa_max)
+    
+#     j = int(np.floor(m*np.random.rand()))
+#     k = (m-1) - j
+    
+#     while j > 0 and L > 0.0 and kappa_log_posterior(L, kappa_max, dev_curr, dev_prev, rmusample, sigma2_qx, kappa_aprior, kappa_bprior) > logy:
+#         L = max(L - w, 0.0)
+#         j -= 1
+        
+#     while k > 0 and R < kappa_max and kappa_log_posterior(R, kappa_max, dev_curr, dev_prev, rmusample, sigma2_qx, kappa_aprior, kappa_bprior) > logy:
+#         R = min(R + w, kappa_max)
+#         k -= 1
+    
+#     # Step 3: shrinkage
+#     while True:
+#         kappa_new = np.random.uniform(L, R)
+#         if kappa_log_posterior(kappa_new, kappa_max, dev_curr, dev_prev, rmusample, sigma2_qx, kappa_aprior, kappa_bprior) >= logy:
+#             return kappa_new
+        
+#         if kappa_new < kappa_current:
+#             L = kappa_new
+#         else:
+#             R = kappa_new
 
 
 

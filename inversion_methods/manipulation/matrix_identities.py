@@ -76,10 +76,6 @@ def kalman_gain_woodbury(Pf_aug, H_aug, R_inv):
     
     nz = Pf_aug.shape[0]
 
-    # print(Pf_aug)
-
-    Pf_aug = 0.5 * (Pf_aug + Pf_aug.T)
-
     try:
 
         L = cholesky(Pf_aug, lower=True)
@@ -109,7 +105,7 @@ def kalman_gain_woodbury(Pf_aug, H_aug, R_inv):
 
     X = Ainv_B(S, B)
 
-    term2 = term1 @ H_aug @ (L @ X)
+    term2 = term1 @ W @ X
 
     K = term1 - term2
 
