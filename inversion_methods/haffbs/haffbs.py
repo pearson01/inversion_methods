@@ -155,8 +155,10 @@ def haffbs_function(config: InversionParameters):
         bctrace, 
         rtrace, 
         var_rep_trace, 
-        var_qx_trace, 
-        kappatrace
+        var_qxout_trace, 
+        var_qxin_trace, 
+        kappaouttrace,
+        kappaintrace
         ) = augmented_ffbs_mxkf_gibbs_double_slice(inversion_input)
     
     else:
@@ -164,8 +166,10 @@ def haffbs_function(config: InversionParameters):
         (xtrace, 
         rtrace, 
         var_rep_trace, 
-        var_qx_trace, 
-        kappatrace
+        var_qxout_trace, 
+        var_qxin_trace, 
+        kappaouttrace,
+        kappaintrace
         ) = augmented_ffbs_mxkf_gibbs_double_slice(inversion_input)
 
         bctrace = None
@@ -180,8 +184,10 @@ def haffbs_function(config: InversionParameters):
                                           bctrace=bctrace,
                                           rtrace=rtrace,
                                           var_rep_trace=var_rep_trace,
-                                          var_qx_trace=var_qx_trace,
-                                          kappatrace=kappatrace,
+                                          var_qxout_trace=var_qxout_trace,
+                                          var_qxin_trace=var_qxin_trace,
+                                          kappaouttrace=kappaouttrace,
+                                          kappaintrace=kappaintrace,
                                           xprior=inversion_input.xprior,
                                           bcprior=inversion_input.bcprior,
                                           rprior=inversion_input.rprior,

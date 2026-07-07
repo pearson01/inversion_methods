@@ -161,7 +161,7 @@ def build_Wb(zf, xprior, bcprior, rprior, nbasis, nbc):
         Wb_bc = Wb(zf[nbasis:nbasis+nbc], bcprior)
         Wb_x = np.concatenate([Wb_x, Wb_bc])    
 
-    Wb_r = Wb(zf[-1:], rprior)
+    Wb_r = Wb(zf[-2:], rprior)
 
     Wb = np.diag(np.append(Wb_x, Wb_r))
 

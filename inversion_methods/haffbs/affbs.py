@@ -30,7 +30,7 @@ class amxkf_inputs:
     forecast_noise: np.ndarray
     nperiod: int
     sigma_rep: float
-    kappa_x: float
+    # kappa_x: float
     F_aug: np.ndarray
     xprior: dict
     bcprior: dict
@@ -44,7 +44,7 @@ class abs_inputs:
     Pf: np.ndarray
     za_mu: np.ndarray
     Pa: np.ndarray
-    kappa_x: float
+    # kappa_x: float
     F_aug: np.ndarray
     nperiod: int
     Y_dic: dict
@@ -155,40 +155,104 @@ def augmented_forecast_model(z_mu, P_aug, kappa_x, Q_aug, nbasis, nbc):
     return zf_mu, Pf_aug
     
 
-def augmented_forecast_jacobian(kappa, nbasis, nbc):
+# def augmented_forecast_jacobian(kappa_out, kappa_in, nbasis, nbc):
     
-    M = np.eye(nbasis) * kappa
+#     nout = 6
+#     nin = nbasis - nout
+
     
-    B = np.ones((nbasis,1)) * (1-kappa)
-    Ir = np.eye(1)
+#     M_out = np.eye(nout) * kappa_out
+#     M_in = np.eye(nin) * kappa_in
 
-    zero_rx = np.zeros((1, nbasis))
+#     B_out = np.ones((nout,1)) * (1-kappa_out)
+#     B_in = np.ones((nin,1)) * (1-kappa_in)
 
-    if nbc is not None:
-        zero_xbc = np.zeros((nbasis, nbc))
-        zero_bcx = np.zeros((nbc, nbasis))
-        Ibc = np.eye(nbc)
-        zero_bcr = np.zeros((nbc, 1))
-        zero_rbc = np.zeros((1, nbc))
+#     I_rout = np.eye(1)
+#     I_rin = np.eye(1)
+
+#     zero_xoutxin = np.zeros((nout, nin))
+#     zero_xinxout = np.zeros((nin, nout))
+
+#     zero_xoutr = np.zeros((nout, 1))
+#     zero_xinr = np.zeros((nin, 1))
+
+#     zero_rxout = np.zeros((1, nout))
+#     zero_rxin = np.zeros((1, nin))
+
+#     if nbc is not None:
+
+#         I_bc = np.eye(nbc)
+
+#         zero_xoutbc = np.zeros((nout, nbc))
+#         zero_bcxout = np.zeros((nbc, nout))
+
+#         zero_xinbc = np.zeros((nin, nbc))
+#         zero_bcxin = np.zeros((nbc, nin))
+
+#         zero_bcr = np.zeros((nbc, 1))
+#         zero_rbc = np.zeros((1, nbc))
         
 
-        return np.block([[M, zero_xbc, B], [zero_bcx, Ibc, zero_bcr], [zero_rx, zero_rbc, Ir]])
+#         return np.block([[M_out, zero_xoutxin, zero_xoutbc, B_out, zero_xoutr], 
+#                          [zero_xinxout, M_in, zero_xinbc, zero_xinr, B_in], 
+#                          [zero_bcxout, zero_bcxin, I_bc, zero_bcr, zero_bcr],
+#                          [zero_rxout, zero_rxin, zero_rbc, I_rout, zero_rxin],
+#                          [zero_rxout, zero_rxin, zero_rbc, zero_rxin, I_rin]
+#                          ])
     
+#     else:
+
+#         return np.block([[M_out, zero_xoutxin, B_out, zero_xoutr], 
+#                          [zero_xinxout, M_in, zero_xinr, B_in], 
+#                          [zero_rxout, zero_rxin, I_rout, zero_rxin],
+#                          [zero_rxout, zero_rxin, zero_rxin, I_rin]
+#                          ])
+    
+
+def augmented_forecast_jacobian(kappa_out, kappa_in, nbasis, nbc=None, nout=6):
+
+    nin = nbasis - nout
+
+    size = nbasis + 2 + (nbc or 0)
+
+    J = np.zeros((size, size))
+
+    # Main blocks
+    J[:nout, :nout] = kappa_out * np.eye(nout)
+    J[nout:nbasis, nout:nbasis] = kappa_in * np.eye(nin)
+
+    if nbc is not None:
+        bc_start = nbasis
+        J[bc_start:bc_start+nbc,
+          bc_start:bc_start+nbc] = np.eye(nbc)
+
+        rout = bc_start + nbc
     else:
+        rout = nbasis
 
-        return np.block([[M, B], [zero_rx, Ir]])
+    rin = rout + 1
+
+    # Coupling terms
+    J[:nout, rout] = 1 - kappa_out
+    J[nout:nbasis, rin] = 1 - kappa_in
+
+    # Persistent scalar states
+    J[rout, rout] = 1.0
+    J[rin, rin] = 1.0
+
+    return J
 
 
 
-# def slow_augmented_forecast_model(z_mu, P_aug, F_aug, Q_aug):
+def slow_augmented_forecast_model(z_mu, P_aug, F_aug, Q_aug):
     
-#     zf_mu = F_aug @ z_mu
+    zf_mu = F_aug @ z_mu
 
-#     Pf_aug = F_aug @ P_aug @ F_aug.T + Q_aug
+    Pf_aug = F_aug @ P_aug @ F_aug.T + Q_aug
 
-#     Pf_aug = 0.5 * (Pf_aug + Pf_aug.T)
+    Pf_aug = 0.5 * (Pf_aug + Pf_aug.T)
 
-#     return zf_mu, Pf_aug
+    return zf_mu, Pf_aug
 
 
 
@@ -238,7 +302,7 @@ def augmented_analysis_update(zf_mu, Pf_aug, K_aug, H_hat_aug, d, sigma2_rep, si
 def augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
         
 
-    nr = 1 # currently only 1 global relaxation term
+    nr = 2 # currently only 2 global relaxation term
     nx = config.nbasis
     
     if config.nbc:
@@ -251,7 +315,7 @@ def augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
     za_mu = np.zeros((config.nperiod, nz))
     Pa = np.zeros((config.nperiod, nz, nz))
 
-    # Q_aug = np.diag(config.forecast_noise)
+    Q_aug = np.diag(config.forecast_noise)
 
     for t in range(config.nperiod):
         H = config.Hz_dic[t]
@@ -264,8 +328,8 @@ def augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
             za_mu[-1] = config.zprior_mus
             Pa[-1] = config.zprior_covariance
 
-        zf_mu[t], Pf[t] = augmented_forecast_model(za_mu[t-1], Pa[t-1], config.kappa_x, config.forecast_noise, config.nbasis, config.nbc)
-        # zf_mu[t], Pf[t] = slow_augmented_forecast_model(za_mu[t-1], Pa[t-1], config.F_aug, Q_aug)
+        # zf_mu[t], Pf[t] = augmented_forecast_model(za_mu[t-1], Pa[t-1], config.kappa_x, config.forecast_noise, config.nbasis, config.nbc)
+        zf_mu[t], Pf[t] = slow_augmented_forecast_model(za_mu[t-1], Pa[t-1], config.F_aug, Q_aug)
 
         zf = state_vector_mu_transform(zf_mu[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
 
@@ -293,7 +357,7 @@ def augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
                          Pf=Pf,
                          za_mu=za_mu,
                          Pa=Pa,
-                         kappa_x=config.kappa_x,
+                        #  kappa_x=config.kappa_x,
                          F_aug=config.F_aug,
                          nperiod=config.nperiod,
                          Y_dic=config.Y_dic,

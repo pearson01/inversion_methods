@@ -8,7 +8,7 @@ from pandas import date_range, to_datetime
 from dataclasses import dataclass
 
 
-from inversion_methods.haffbs.affbs import augmented_mxkf, augmented_backward_sampler, amxkf_inputs, build_Pz, augmented_forecast_jacobian
+from inversion_methods.haffbs.affbs import augmented_mxkf, slow_augmented_backward_sampler, amxkf_inputs, build_Pz, augmented_forecast_jacobian
 from inversion_methods.haffbs.hierarchical_samplers import sample_sigma2_rep, sample_sigma2_qx, sample_kappa, kappa_max
 
 from openghg_inversions import utils, convert
@@ -106,7 +106,7 @@ def haffbs_monthly_dictionaries(config: MessyInput) -> InversionInput:
         else:
             Hz_dic[period] = Hx_dic[period]
         
-        Hr = np.zeros((len(Y_dic[period]), 1))
+        Hr = np.zeros((len(Y_dic[period]), 2))
         Hz_dic[period] = np.hstack((Hz_dic[period], Hr))
 
 
@@ -152,6 +152,9 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
 
     burn = int(0.2 * config.iterations)
 
+    nxout = 6    # Number of "outer" basis functions, taken from Intem
+    nxin = config.nbasis - nxout    # Number of "inner" basis functions, those more likely to be constrained by the obs
+
     xprior_mu, xprior_sigma = prior_parser(config.xprior)
 
     rprior_mu, rprior_sigma = prior_parser(config.rprior)
@@ -163,10 +166,10 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
     kappa_x_aprior, kappa_x_bprior = prior_parser(config.kappa_x_prior)
 
     rprior_sigma2 = rprior_sigma**2
-    rprior_sigma2s = np.ones(1) * rprior_sigma2
+    rprior_sigma2s = np.ones(2) * rprior_sigma2
 
     xprior_mus = np.ones(config.nbasis) * xprior_mu
-    rprior_mus = np.ones(1) * rprior_mu
+    rprior_mus = np.ones(2) * rprior_mu
 
     if config.nbc:
         bcprior_mu, bcprior_sigma = prior_parser(config.bcprior)
@@ -195,24 +198,30 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
     sigma2_rep_current = 1000
     
     # sigma2_qx_current = 0.01
-    sigma2_qx_current = np.ones(config.nbasis) * 0.01
+    sigma2_qxout_current = 0.01
+    sigma2_qxin_current = 0.01
 
     sigma2_qr = config.sigma_qr**2
-    sigma2_qrs = np.ones(1) * sigma2_qr
+    sigma2_qrs = np.ones(2) * sigma2_qr
 
-    kappa_x_current = 0.5
+    kappa_xout_current = 0.5
+    kappa_xin_current = 0.5
     # kappa_x_current = 0
     kappa_x_max = kappa_max(config.nperiod, 1)
 
     xtrace = np.zeros((config.iterations, config.nperiod,  config.nbasis))
-    rtrace = np.zeros((config.iterations, config.nperiod, 1))
+    rtrace = np.zeros((config.iterations, config.nperiod, 2))
     var_rep_trace = np.zeros(config.iterations)
-    var_qx_trace = np.zeros(config.iterations)
+    var_qxout_trace = np.zeros(config.iterations)
+    var_qxin_trace = np.zeros(config.iterations)
     # var_qx_trace = np.zeros((config.iterations, config.nbasis))
-    kappatrace = np.zeros(config.iterations)
+    kappaouttrace = np.zeros(config.iterations)
+    kappaintrace = np.zeros(config.iterations)
 
 
     for i in range(config.iterations):
+
+        print(f"Iteration:{i}, Current sigma2_rep: {sigma2_rep_current}", flush=True)
 
         # if i > 0 and i % 100 == 0:
         #     print(f"Gibbs iteration {i}", flush=True)
@@ -222,9 +231,11 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         # xprior_sigma2 = (sigma2_qx_current / (1-kappa_x_current**2))
         xprior_sigma2s = np.ones(config.nbasis) * xprior_sigma2
         
-        F_aug = augmented_forecast_jacobian(kappa_x_current, config.nbasis, config.nbc)
+        F_aug = augmented_forecast_jacobian(kappa_xout_current, kappa_xin_current, config.nbasis, config.nbc, nxout)
 
-        sigma2_qxs = np.ones(config.nbasis) * sigma2_qx_current
+        sigma2_qxouts = np.ones(nxout) * sigma2_qxout_current
+        sigma2_qxins = np.ones(nxin) * sigma2_qxin_current
+        sigma2_qxs = np.concatenate((sigma2_qxouts, sigma2_qxins))
         # sigma2_qxs = sigma2_qx_current
 
         if config.nbc:
@@ -250,7 +261,7 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
                                      forecast_noise=sigma2_qzs,
                                      nperiod=config.nperiod,
                                      sigma_rep=sigma2_rep_current**0.5,
-                                     kappa_x=kappa_x_current,
+                                    #  kappa_x=kappa_x_current,
                                      F_aug=F_aug,
                                      xprior=config.xprior,
                                      bcprior=config.bcprior,
@@ -262,37 +273,45 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
 
         # zmusample, zsample = augmented_sampler(za_mu, Pa, zf_mu, Pf, F, nt)
         # zmusample, zsample, state_residuals = augmented_backward_sampler(sampler_inputs)
-        zmusample, zsample, state_residuals = augmented_backward_sampler(sampler_inputs)
+        zmusample, zsample, state_residuals = slow_augmented_backward_sampler(sampler_inputs)
 
         xtrace[i] = zsample[:,:config.nbasis]
         
         if config.nbc:
-            bctrace[i] = zsample[:,config.nbasis:-1]
+            bctrace[i] = zsample[:,config.nbasis:-2]
 
-        rtrace[i] = zsample[:,-1:]
-
-        print(f"Iteration:{i}, Current sigma2_rep: {sigma2_rep_current}", flush=True)
+        rtrace[i] = zsample[:,-2:]
 
         sigma2_rep_current = sample_sigma2_rep(sigma2_rep_current, state_residuals**2, sigma_obs, sigma2_rep_aprior, sigma2_rep_bprior)
         
         var_rep_trace[i] = sigma2_rep_current
 
-        # sigma2_qx_current = sample_sigma2_qx(zmusample, kappa_x_current, sigma2_qx_aprior, sigma2_qx_bprior, config.nbasis)
+        zmusample_out = np.column_stack((zmusample[:,:nxout], zmusample[:,-2]))
+        zmusample_in = np.column_stack((zmusample[:,nxout:config.nbasis], zmusample[:,-1]))
 
-        # var_qx_trace[i] = (np.exp(sigma2_qx_current) - 1) * np.exp(sigma2_qx_current)
+        sigma2_qxout_current = sample_sigma2_qx(zmusample_out, kappa_xout_current, sigma2_qx_aprior, sigma2_qx_bprior, nxout)
+        sigma2_qxin_current = sample_sigma2_qx(zmusample_in, kappa_xin_current, sigma2_qx_aprior, sigma2_qx_bprior, nxin)
+
+        # var_qxout_trace[i] = (np.exp(sigma2_qxout_current) - 1) * np.exp(sigma2_qxout_current)
+        # var_qxin_trace[i] = (np.exp(sigma2_qxin_current) - 1) * np.exp(sigma2_qxin_current)
+        var_qxout_trace[i] = sigma2_qxout_current
+        var_qxin_trace[i] = sigma2_qxin_current
         # var_qx_trace[i] = omega_sig2_current
 
-        kappa_x_current = sample_kappa(zmusample, sigma2_qx_current, kappa_x_current, kappa_x_max, kappa_x_aprior, kappa_x_bprior, config.nbasis)
+        kappa_xout_current = sample_kappa(zmusample_out, sigma2_qxout_current, kappa_xout_current, kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxout)
+        kappa_xin_current = sample_kappa(zmusample_in, sigma2_qxin_current, kappa_xin_current, kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxin)
 
-        kappatrace[i] = kappa_x_current
+        kappaouttrace[i] = kappa_xout_current
+        kappaintrace[i] = kappa_xin_current
 
         # sigma2_rep_current = 400
         
         # var_rep_trace[i] = sigma2_rep_current
 
-        sigma2_qx_current = 0.01
+        # sigma2_qx_current = 0.01
 
-        var_qx_trace[i] = (np.exp(sigma2_qx_current) - 1) * np.exp(sigma2_qx_current)
+        # var_qxout_trace[i] = (np.exp(sigma2_qx_current) - 1) * np.exp(sigma2_qx_current)
+        # var_qxin_trace[i] = (np.exp(sigma2_qx_current) - 1) * np.exp(sigma2_qx_current)
         # var_qx_trace[i] = omega_sig2_current
 
         # kappa_x_current = 0.7
@@ -300,9 +319,10 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         # kappatrace[i] = kappa_x_current
 
     if config.nbc:
-        return xtrace[burn:], bctrace[burn:], rtrace[burn:], var_rep_trace[burn:], var_qx_trace[burn:], kappatrace[burn:]
+        return xtrace[burn:], bctrace[burn:], rtrace[burn:], var_rep_trace[burn:], var_qxout_trace[burn:], var_qxin_trace[burn:], kappaouttrace[burn:], kappaintrace[burn:]
+
     else:
-        return xtrace[burn:], rtrace[burn:], var_rep_trace[burn:], var_qx_trace[burn:], kappatrace[burn:]
+        return xtrace[burn:], rtrace[burn:], var_rep_trace[burn:], var_qxout_trace[burn:], var_qxin_trace[burn:], kappaouttrace[burn:], kappaintrace[burn:]
 
 
 @dataclass
@@ -310,8 +330,10 @@ class PostProcessInput:
     xtrace: np.ndarray
     rtrace: np.ndarray
     var_rep_trace: np.ndarray
-    var_qx_trace: np.ndarray
-    kappatrace: np.ndarray
+    var_qxout_trace: np.ndarray
+    var_qxin_trace: np.ndarray
+    kappaouttrace: np.ndarray
+    kappaintrace: np.ndarray
     xprior: dict
     rprior: dict
     Hx_dic: dict
@@ -584,9 +606,11 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "xouts_95": (["period", "nUI", "bf"], xouts_95),
         "rtrace": (["stepnum", "period", "r"], config.rtrace),
         "var_rep_trace": (["stepnum"], config.var_rep_trace),
-        "var_qx_trace": (["stepnum"], config.var_qx_trace),
+        "var_qxout_trace": (["stepnum"], config.var_qxout_trace),
+        "var_qxin_trace": (["stepnum"], config.var_qxin_trace),
         # "var_qx_trace": (["stepnum", "bf"], config.var_qx_trace),
-        "kappatrace": (["stepnum"], config.kappatrace),
+        "kappaouttrace": (["stepnum"], config.kappaouttrace),
+        "kappaintrace": (["stepnum"], config.kappaintrace),
         "siteindicator": (["nmeasure"], siteindicator),
         "sitenames": (["nsite"], config.sites),
         "sitelons": (["nsite"], site_lon),
@@ -605,7 +629,7 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
 
     stepnum = np.arange(steps)
     numbf = np.arange(config.nbasis)
-    numr = np.arange(1)
+    numr = np.arange(2)
 
     coords = {
         "stepnum": (["steps"], stepnum),
@@ -666,8 +690,10 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     outds.xsensitivity.attrs["longname"] = "emissions sensitivity timeseries"
     outds.rtrace.attrs["longname"] = "state relaxation term trace"
     outds.var_rep_trace.attrs["longname"] = "representation error variance trace"
-    outds.var_qx_trace.attrs["longname"] = "state forecast model error variance trace"
-    outds.kappatrace.attrs["longname"] = "state persistance term trace"
+    outds.var_qxout_trace.attrs["longname"] = "trace for the state forecast model error variance of the outer bfs"
+    outds.var_qxin_trace.attrs["longname"] = "trace for the state forecast model error variance of the inner bfs"
+    outds.kappaouttrace.attrs["longname"] = "trace for the state persistance term of the outer bfs"
+    outds.kappaintrace.attrs["longname"] = "trace for the state persistance term of the inner bfs"
 
 
     if config.nbc:
