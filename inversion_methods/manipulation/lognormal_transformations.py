@@ -111,7 +111,7 @@ def lognormal_median_stdev(median_lognormal: float,
     return mu, sigma
 
 
-def state_vector_mu_transform(z_mu, xprior, bcprior, rprior, nbasis, nbc):
+def state_vector_mu_transform(z_mu, xprior, bcprior, rprior, nbasis, nbc, nr):
 
     """
     Takes the fully Gaussian state vector and transforms to natural space. Lognormal parameters exponentiated to get the natural median. Gaussian parameters left the same.
@@ -136,8 +136,8 @@ def state_vector_mu_transform(z_mu, xprior, bcprior, rprior, nbasis, nbc):
 
     if nbc:
         z[nbasis:nbasis+nbc] = transform(z_mu[nbasis:nbasis+nbc], bcprior)
-
-    z[-1] = transform(z_mu[-1], rprior)
+    
+    z[-nr:] = transform(z_mu[-nr:], rprior)
 
     return z
 
