@@ -141,12 +141,6 @@ def build_boundary_conditions(fp_data, sites, config: DataConfig):
     
     else:
         for si, site in enumerate(sites):
-            # if config.bc_freq == "monthly":
-            #     Hmbc = setup.monthly_bcs(config.start_date, config.end_date, site, fp_data)
-            # elif config.bc_freq is None:
-            #     Hmbc = fp_data[site].H_bc.values
-            # else:
-            #     Hmbc = setup.create_bc_sensitivity(config.start_date, config.end_date, site, fp_data, config.bc_freq)
 
             Hmbc = fp_data[site].H_bc.values
 

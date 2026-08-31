@@ -114,10 +114,7 @@ def sigma2_rep_log_posterior(s_current, r2, sigma_obs, alpha_prior, beta_prior, 
 
     # Beta prior on z = sigma2_rep / sigma2_rep_max
     # p(sigma2_rep) = BetaPDF(z; alpha, beta) / sigma2_rep_max
-    logprior = (
-        (alpha_prior - 1) * np.log(z)
-        + (beta_prior - 1) * np.log1p(-z)
-    )
+    logprior = (alpha_prior - 1) * np.log(z) + (beta_prior - 1) * np.log1p(-z)
 
     # Jacobian for sigma2_rep = exp(s_current)
     return loglik + logprior + s_current
