@@ -28,5 +28,11 @@ dependencies = [
 "Home" = "https://github.com/pearson01/inversion_methods"
 "Bug Tracker" = "https://github.com/pearson01/inversion_methods/issues"
 
+[project.optional-dependencies]
+test = ["pytest"]
+
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

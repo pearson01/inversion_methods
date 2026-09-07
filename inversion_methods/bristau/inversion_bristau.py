@@ -228,7 +228,7 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
     xprior_mu, xprior_sigma = prior_parser(config.xprior)
     rprior_mu, rprior_sigma = prior_parser(config.rprior)
 
-    if sigma_qx_scheme != "fixed additive":
+    if sigma_rep_scheme != "fixed additive":
         sigma2_rep_aprior, sigma2_rep_bprior = prior_parser(config.sigma2_rep_prior)
         sigma2_rep_max=config.sigma_rep_max**2
     else:
@@ -340,7 +340,7 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         xinprior_sigma2s = (sigma2_qxin_bf + sigma2_qr) / (1.0 - kappa_x_vector_current[-1]**2)
         xinprior_sigma2s = np.minimum(xinprior_sigma2s, xprior_sigma**2,)
 
-        if nxout > 0 and n_kappa_x_parameters == 2:
+        if nxout > 0:
             sigma2_qxout_bf = sigma2_qx_bf_current[:nxout]
 
             xoutprior_sigma2s = (sigma2_qxout_bf + sigma2_qr) / (1.0 - kappa_x_vector_current[0]**2)

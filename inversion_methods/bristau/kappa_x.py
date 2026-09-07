@@ -86,18 +86,18 @@ def update_kappa_x(zmusample,
 
     if kappa_x_scheme == "fixed":
 
-        kappa_x_sample = fixed_kappa_x
+        kappa_x_sample = np.full_like(kappa_x_vector_current, fixed_kappa_x)
 
     elif kappa_x_scheme == "global" and nxout == 0:
 
-        kappa_x_sample == sample_kappa(zmusample, sigma2_qx_bf_current, kappa_x_vector_current, kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxin)
+        kappa_x_sample = sample_kappa(zmusample, sigma2_qx_bf_current, kappa_x_vector_current, kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxin)
 
     elif kappa_x_scheme == "inner outer" and nxout > 0:
 
         kappa_x_sample = np.zeros_like(kappa_x_vector_current)
 
-        kappa_x_sample[0] == sample_kappa(zmusample_out, sigma2_qx_bf_current[:nxout], kappa_x_vector_current[0], kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxout)
-        kappa_x_sample[1] == sample_kappa(zmusample_in, sigma2_qx_bf_current[nxout:], kappa_x_vector_current[1], kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxin)
+        kappa_x_sample[0] = sample_kappa(zmusample_out, sigma2_qx_bf_current[:nxout], kappa_x_vector_current[0], kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxout)
+        kappa_x_sample[1] = sample_kappa(zmusample_in, sigma2_qx_bf_current[nxout:], kappa_x_vector_current[1], kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxin)
 
     else:
 

@@ -86,23 +86,15 @@ def augmented_forecast_model(
 
     The basis coefficients relax toward their respective reference states:
 
-        x_out(t + 1)
-            = kappa_out * x_out(t)
-            + (1 - kappa_out) * r_out(t)
+        x_out(t + 1) = kappa_out * x_out(t) + (1 - kappa_out) * r_out(t)
 
-        x_in(t + 1)
-            = kappa_in * x_in(t)
-            + (1 - kappa_in) * r_in(t)
+        x_in(t + 1) = kappa_in * x_in(t) + (1 - kappa_in) * r_in(t)
 
     The reference states relax toward rprior:
 
-        r_out(t + 1)
-            = kappa_r * r_out(t)
-            + (1 - kappa_r) * rprior
+        r_out(t + 1) = kappa_r * r_out(t) + (1 - kappa_r) * rprior
 
-        r_in(t + 1)
-            = kappa_r * r_in(t)
-            + (1 - kappa_r) * rprior
+        r_in(t + 1) = kappa_r * r_in(t) + (1 - kappa_r) * rprior
 
     This is an affine Gaussian forecast model:
 
@@ -569,19 +561,13 @@ def augmented_backward_sampler(
 
     The basis-coefficient transitions are:
 
-        x_out(t + 1)
-            = kappa_out * x_out(t)
-            + (1 - kappa_out) * r_out(t)
+        x_out(t + 1) = kappa_out * x_out(t) + (1 - kappa_out) * r_out(t)
 
-        x_in(t + 1)
-            = kappa_in * x_in(t)
-            + (1 - kappa_in) * r_in(t)
+        x_in(t + 1) = kappa_in * x_in(t) + (1 - kappa_in) * r_in(t)
 
     The reference-state transitions are:
 
-        r(t + 1)
-            = kappa_r * r(t)
-            + (1 - kappa_r) * rprior
+        r(t + 1) = kappa_r * r(t) + (1 - kappa_r) * rprior
 
     The additive rprior term affects the forecast mean but not the
     transition Jacobian used by the backward sampler. Therefore, the
@@ -654,8 +640,10 @@ def augmented_backward_sampler(
     nperiod = int(config.nperiod)
     nbasis = int(config.nbasis)
     nxout = int(config.nxout)
-    nbc = int(config.nbc)
     nr = int(config.nr)
+
+    nbc = 0 if config.nbc is None else int(config.nbc)
+
 
     nxin = nbasis - nxout
     nstate = nbasis + nbc + nr

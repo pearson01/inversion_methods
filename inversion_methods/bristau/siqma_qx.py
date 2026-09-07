@@ -294,7 +294,7 @@ def sample_sigma2_qx(zmusample, kappa_x, alpha_prior, beta_prior, nbasis, sigma2
     F_max = invgamma.cdf(sigma2_qx_max, a=shape, scale=scale)
     sigma2_qx_sample = invgamma.ppf(np.random.uniform(0, F_max), a=shape, scale=scale)
 
-    return np.asarray([sigma2_qx_sample], dtype=float)
+    return float(sigma2_qx_sample)
 
 
 def sample_sigma2_qx_grouped(zmusample_in, kappa_xin, alpha_prior, beta_prior, group_id, ngroup, sigma2_qx_max=0.5):
