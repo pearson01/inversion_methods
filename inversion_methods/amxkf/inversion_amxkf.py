@@ -202,7 +202,7 @@ def augmented_mxkf(config: InversionInput):
 
         Wb = build_Wb(zf, config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc)
         Wo_inv = np.eye(ny)
-        H_hat = Wo_inv @ H @ Wb
+        H_hat = Wo_inv @ (H * Wb[None, :])
 
         K, d = augmented_forecast_innovations(Y, sigma_obs, config.sigma_rep**2, zf, Pf, H, H_hat)
         

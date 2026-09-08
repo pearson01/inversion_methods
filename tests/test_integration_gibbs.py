@@ -149,3 +149,100 @@ def test_gibbs_sampler_supports_outer_basis_functions_with_fixed_kappa():
     xtrace = outputs[0]
     assert xtrace.shape[2] == config.nbasis
     assert np.all(np.isfinite(xtrace))
+
+
+def test_gibbs_sampler_supports_sigma_qx_inner_outer_with_fixed_kappa():
+    """
+    Bug regression: update_sigma2_qx only assigned kappa_xout_current inside
+    its n_kappa_x_parameters == 2 branch. With a fixed (single-parameter)
+    kappa_x scheme and sigma_qx="inner outer" (or "inner outer country"),
+    kappa_xout_current was referenced unbound, raising UnboundLocalError on
+    the first Gibbs iteration. A single fixed/global kappa_x should be
+    usable with sigma_qx inference of any dimensionality.
+    """
+    config = _make_inversion_input(
+        kappa_x=0.3, nxout=2, sigma_qx="inner outer", nbc=0,
+        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+    )
+    outputs = augmented_ffbs_mxkf_gibbs_double_slice(config)
+    xtrace, sigma2_qx_trace = outputs[0], outputs[4]
+    assert sigma2_qx_trace.shape[1] == 2
+    assert np.all(np.isfinite(xtrace))
+    assert np.all(np.isfinite(sigma2_qx_trace))
+
+
+def _make_inversion_input_with_timestamps(
+    nperiod=3, nbasis=4, nr=2, ny_per_period=20, iterations=8, seed=0,
+    tau_resid="global", tau_resid_prior=None, tau_resid_max=48.0,
+):
+    """
+    Like _make_inversion_input, but with real datetime64 timestamps spread
+    across two alternating sites, needed to exercise the AR(1)/OU
+    same-site residual-correlation feature (ar1_resid.py).
+    """
+    rng = np.random.default_rng(seed)
+    Y_dic, sigma_obs_dic, Ytime_dic, Hz_dic, Hx_dic, siteindicator_dic = {}, {}, {}, {}, {}, {}
+    base_time = np.datetime64("2020-01-01T00:00")
+    for t in range(nperiod):
+        Hx = rng.uniform(0.1, 1.0, size=(ny_per_period, nbasis))
+        Hr = np.zeros((ny_per_period, nr))
+        Hz_dic[t] = np.hstack([Hx, Hr])
+        Hx_dic[t] = Hx
+        true_x = rng.uniform(0.8, 1.2, size=nbasis)
+        Y_dic[t] = Hx @ true_x + rng.normal(scale=0.1, size=ny_per_period)
+        sigma_obs_dic[t] = np.full(ny_per_period, 0.1)
+        hours = t * 30 * 24 + np.arange(ny_per_period) * 3  # 3-hourly, per period offset by 30 days
+        Ytime_dic[t] = base_time + hours.astype("timedelta64[h]")
+        siteindicator_dic[t] = np.arange(ny_per_period) % 2  # two alternating sites
+
+    xprior = {"pdf": "lognormal", "mu": 0.0, "sigma": 0.5}
+    rprior = {"pdf": "lognormal", "mu": 0.0, "sigma": 0.5}
+
+    return InversionInput(
+        Y_dic=Y_dic, sigma_obs_dic=sigma_obs_dic, Ytime_dic=Ytime_dic, Hz_dic=Hz_dic,
+        Hx_dic=Hx_dic, Hbc_dic={}, siteindicator_dic=siteindicator_dic,
+        nperiod=nperiod, nbc=0, nxout=0, nr=nr, nbasis=nbasis,
+        xprior=xprior, bcprior=None, rprior=rprior,
+        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        sigma2_qx_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        sigma_qbc=0.0, sigma_qr=0.1, kappa_x_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        iterations=iterations, inner_group_id=None, ningroup=None,
+        sigma_rep=5.0, sigma_rep_max=100.0,
+        sigma_qx=0.02, sigma_qx_max=0.5,
+        kappa_x=0.3, kappa_x_minfold=1, kappa_bc=None, kappa_r=0.0,
+        tau_resid=tau_resid,
+        tau_resid_prior=tau_resid_prior or {"pdf": "beta", "shape": 1.5, "scale": 1.5},
+        tau_resid_max=tau_resid_max,
+    )
+
+
+def test_gibbs_sampler_default_tau_resid_is_an_exact_noop():
+    """
+    tau_resid defaults to 0.0 (fixed): the AR(1)/OU whitening step must be a
+    strict no-op, so this feature cannot silently change results for any
+    existing caller that doesn't opt in.
+    """
+    config = _make_inversion_input_with_timestamps(tau_resid=0.0, tau_resid_prior=None, tau_resid_max=None)
+    outputs = augmented_ffbs_mxkf_gibbs_double_slice(config)
+    tau_trace, tau_trace_labels = outputs[8], outputs[9]
+
+    assert tau_trace_labels == ["global"]
+    np.testing.assert_array_equal(tau_trace, 0.0)
+    assert np.all(np.isfinite(outputs[0]))
+
+
+def test_gibbs_sampler_learns_tau_resid_global_end_to_end():
+    """
+    With tau_resid='global', tau should be sampled (not stuck at its
+    initial value) and stay within (0, tau_resid_max), and the run must
+    still produce finite emissions/hyperparameter traces.
+    """
+    config = _make_inversion_input_with_timestamps(tau_resid="global")
+    outputs = augmented_ffbs_mxkf_gibbs_double_slice(config)
+    tau_trace, tau_trace_labels = outputs[8], outputs[9]
+
+    assert tau_trace_labels == ["global"]
+    assert tau_trace.shape == (config.iterations - int(0.2 * config.iterations), 1)
+    assert np.all((tau_trace > 0) & (tau_trace < config.tau_resid_max))
+    assert len(np.unique(tau_trace)) > 1
+    assert np.all(np.isfinite(outputs[0]))  # xtrace

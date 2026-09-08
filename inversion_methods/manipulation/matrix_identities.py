@@ -242,104 +242,216 @@ def kalman_gain_woodbury(
     return K
 
 
-def kalman_gain_woodbury_from_cholesky(
+# def kalman_gain_woodbury_from_cholesky(
+#     L,
+#     H_aug,
+#     R_inv,
+# ):
+#     """
+#     Compute the Kalman gain using the Woodbury identity and a
+#     Cholesky factor of the forecast covariance.
+
+#     This implementation is intended for problems in which the number
+#     of observations is substantially greater than the state dimension,
+#     ``ny >> nz``. It avoids constructing or factorizing the
+#     ``ny x ny`` innovation covariance matrix by performing the update
+#     in state space.
+
+#     The gain is calculated using
+
+#         K = A^{-1} H_hat.T R^{-1},
+
+#     where
+
+#         A = Pf^{-1} + H_hat.T R^{-1} H_hat,
+
+#     ``Pf`` is the forecast-error covariance, ``R`` is the
+#     observation-error covariance, and ``Pf_chol`` is a Cholesky factor
+#     of ``Pf``.
+
+#     The observation-error covariance is assumed to be diagonal, with
+#     ``r_inv`` containing the diagonal elements of ``R^{-1}``. The
+#     function does not explicitly construct ``Pf^{-1}``, ``R``, or the
+#     observation-space innovation covariance.
+
+#     Parameters
+#     ----------
+#     Pf_chol : ndarray, shape (nz, nz)
+#         Lower- or upper-triangular Cholesky factor of the forecast-error
+#         covariance matrix ``Pf``. The interpretation of the triangular
+#         factor must match that used internally by the implementation.
+
+#     H_hat : ndarray, shape (ny, nz)
+#         Linearized observation operator mapping the state vector into
+#         observation space.
+
+#     r_inv : ndarray, shape (ny,)
+#         Diagonal elements of the inverse observation-error covariance
+#         matrix, ``R^{-1}``. All elements should be finite and strictly
+#         positive.
+
+#     Returns
+#     -------
+#     K : ndarray, shape (nz, ny)
+#         Kalman gain matrix.
+
+#     S_factor : tuple of (ndarray, bool)
+#         Cholesky factorization of the state-space posterior precision matrix
+
+#     """
+
+#     H_aug = np.asarray(H_aug)
+#     R_inv = np.asarray(R_inv)
+
+#     nz = L.shape[0]
+
+#     # W has shape (ny, nz).
+#     W = H_aug @ L
+
+#     # Apply diagonal R^{-1} by row scaling:
+#     #
+#     # R^{-1} W
+#     #
+#     # This avoids forming an ny-by-ny diagonal matrix.
+#     RinvW = R_inv[:, None] * W
+
+#     # Woodbury system:
+#     #
+#     # S = I + L.T H.T R^{-1} H L
+#     #   = I + W.T R^{-1} W
+#     #
+#     # S has shape (nz, nz).
+#     S = W.T @ RinvW
+#     S.flat[:: nz + 1] += 1.0
+
+#     # Floating-point matrix multiplication can introduce very small
+#     # asymmetries.
+#     S = _symmetrize_square(S)
+
+#     # Right-hand side:
+#     #
+#     # B = L.T H.T R^{-1}
+#     #   = W.T R^{-1}
+#     #
+#     # Since W = H L, using W.T directly avoids an additional
+#     # multiplication by L.T.
+#     B = RinvW.T
+
+#     # In exact arithmetic S is positive definite because:
+#     #
+#     # S = I + W.T R^{-1} W
+#     #
+#     # with R_inv > 0. A regular Cholesky factorization should
+#     # therefore normally succeed.
+#     try:
+#         S_factor = cho_factor(S, lower=True, overwrite_a=False, check_finite=False)
+
+#     except np.linalg.LinAlgError:
+#         # This should be rare and usually indicates severe numerical
+#         # scaling or invalid inputs.
+#         S_L, _, _ = _cholesky_with_repair(S)
+
+#         # Construct the tuple expected by cho_solve. Because S_L is
+#         # explicitly lower triangular, lower=True is appropriate.
+#         S_factor = (S_L, True)
+
+#     # X = S^{-1} B, without explicitly calculating S^{-1}.
+#     X = cho_solve(S_factor, B, overwrite_b=False, check_finite=False)
+
+#     # Simplified Woodbury expression.
+#     K = L @ X
+
+#     return K, S_factor
+
+
+def kalman_gain_woodbury_from_gram(
     L,
-    H_aug,
-    R_inv,
+    G,
+    wb,
+    h,
 ):
     """
-    Compute the Kalman gain using the Woodbury identity and a
-    Cholesky factor of the forecast covariance.
+    Compute the Kalman gain applied to a vector, K @ d, using the
+    Woodbury identity, given that the observation contribution has
+    already been reduced to a state-space Gram matrix and vector.
+
+    This is a further reduction of the Woodbury gain calculation for
+    problems where:
+
+    - ``H_hat = H @ diag(wb)`` for a state-dependent diagonal ``wb``
+      (e.g. the Jacobian of a lognormal state transform), and
+    - ``H`` and ``R_inv`` are fixed across repeated calls made with
+      different ``wb`` (e.g. across Gauss-Newton relinearization
+      iterations at a fixed time step).
+
+    In that case, the ``(ny, nz)`` observation operator never needs to
+    be touched again once the caller has formed, once,
+
+        G = H.T @ diag(R_inv) @ H,          shape (nz, nz)
+        h = H.T @ diag(R_inv) @ d,          shape (nz,)
+
+    because for any ``wb``:
+
+        H_hat.T @ diag(R_inv) @ H_hat = diag(wb) @ G @ diag(wb)
+        H_hat.T @ diag(R_inv) @ d     = wb * h
 
     This implementation is intended for problems in which the number
     of observations is substantially greater than the state dimension,
-    ``ny >> nz``. It avoids constructing or factorizing the
-    ``ny x ny`` innovation covariance matrix by performing the update
-    in state space.
-
-    The gain is calculated using
-
-        K = A^{-1} H_hat.T R^{-1},
-
-    where
-
-        A = Pf^{-1} + H_hat.T R^{-1} H_hat,
-
-    ``Pf`` is the forecast-error covariance, ``R`` is the
-    observation-error covariance, and ``Pf_chol`` is a Cholesky factor
-    of ``Pf``.
-
-    The observation-error covariance is assumed to be diagonal, with
-    ``r_inv`` containing the diagonal elements of ``R^{-1}``. The
-    function does not explicitly construct ``Pf^{-1}``, ``R``, or the
-    observation-space innovation covariance.
+    ``ny >> nz``: every quantity computed here is ``nz``-dimensional,
+    so repeated calls with different ``wb`` cost ``O(nz**3)`` instead
+    of ``O(ny * nz**2)``.
 
     Parameters
     ----------
-    Pf_chol : ndarray, shape (nz, nz)
-        Lower- or upper-triangular Cholesky factor of the forecast-error
-        covariance matrix ``Pf``. The interpretation of the triangular
-        factor must match that used internally by the implementation.
+    L : ndarray, shape (nz, nz)
+        Cholesky factor of the forecast-error covariance ``Pf``.
 
-    H_hat : ndarray, shape (ny, nz)
-        Linearized observation operator mapping the state vector into
-        observation space.
+    G : ndarray, shape (nz, nz)
+        ``H.T @ diag(R_inv) @ H``, not yet weighted by ``wb``.
 
-    r_inv : ndarray, shape (ny,)
-        Diagonal elements of the inverse observation-error covariance
-        matrix, ``R^{-1}``. All elements should be finite and strictly
-        positive.
+    wb : ndarray, shape (nz,)
+        Diagonal entries of the state-dependent Jacobian relating
+        ``H_hat`` to ``H``, i.e. ``H_hat = H @ diag(wb)``.
+
+    h : ndarray, shape (nz,)
+        ``H.T @ diag(R_inv) @ d``, not yet weighted by ``wb``, where
+        ``d`` is the observation-space vector the gain is applied to
+        (e.g. the innovation residual).
 
     Returns
     -------
-    K : ndarray, shape (nz, ny)
-        Kalman gain matrix.
+    Kd : ndarray, shape (nz,)
+        The Kalman gain applied to ``d``, i.e. ``K @ d``.
 
     S_factor : tuple of (ndarray, bool)
         Cholesky factorization of the state-space posterior precision matrix
 
     """
 
-    H_aug = np.asarray(H_aug)
-    R_inv = np.asarray(R_inv)
+    L = np.asarray(L)
+    G = np.asarray(G)
+    wb = np.asarray(wb)
+    h = np.asarray(h)
 
     nz = L.shape[0]
 
-    # W has shape (ny, nz).
-    W = H_aug @ L
-
-    # Apply diagonal R^{-1} by row scaling:
-    #
-    # R^{-1} W
-    #
-    # This avoids forming an ny-by-ny diagonal matrix.
-    RinvW = R_inv[:, None] * W
-
     # Woodbury system:
     #
-    # S = I + L.T H.T R^{-1} H L
-    #   = I + W.T R^{-1} W
+    # S = I + L.T H_hat.T R^{-1} H_hat L
     #
     # S has shape (nz, nz).
-    S = W.T @ RinvW
+    WL = wb[:, None] * L
+    S = WL.T @ G @ WL
+
     S.flat[:: nz + 1] += 1.0
 
     # Floating-point matrix multiplication can introduce very small
     # asymmetries.
     S = _symmetrize_square(S)
 
-    # Right-hand side:
-    #
-    # B = L.T H.T R^{-1}
-    #   = W.T R^{-1}
-    #
-    # Since W = H L, using W.T directly avoids an additional
-    # multiplication by L.T.
-    B = RinvW.T
-
     # In exact arithmetic S is positive definite because:
     #
-    # S = I + W.T R^{-1} W
+    # S = I + L.T H_hat.T R^{-1} H_hat L
     #
     # with R_inv > 0. A regular Cholesky factorization should
     # therefore normally succeed.
@@ -355,13 +467,17 @@ def kalman_gain_woodbury_from_cholesky(
         # explicitly lower triangular, lower=True is appropriate.
         S_factor = (S_L, True)
 
-    # X = S^{-1} B, without explicitly calculating S^{-1}.
-    X = cho_solve(S_factor, B, overwrite_b=False, check_finite=False)
+    # Bd = L.T @ H_hat.T @ diag(R_inv) @ d, without touching the
+    # (ny, nz) observation operator again.
+    Bd = L.T @ (wb * h)
 
-    # Simplified Woodbury expression.
-    K = L @ X
+    # x = S^{-1} Bd, without explicitly calculating S^{-1} or K.
+    x = cho_solve(S_factor, Bd, overwrite_b=False, check_finite=False)
 
-    return K, S_factor
+    # Simplified Woodbury expression: Kd = K @ d = L @ (S^{-1} @ Bd).
+    Kd = L @ x
+
+    return Kd, S_factor
 
 
 def covariance_from_woodbury_factor(L, S_factor):

@@ -163,9 +163,10 @@ def build_Wb(zf, xprior, bcprior, rprior, nbasis, nbc):
 
     Wb_r = Wb(zf[-2:], rprior)
 
-    Wb = np.diag(np.append(Wb_x, Wb_r))
+    # Wb = np.diag(np.append(Wb_x, Wb_r))
+    Wb_vector = np.append(Wb_x, Wb_r)
 
-    return Wb
+    return Wb_vector
 
 
 

@@ -177,6 +177,26 @@ def sigma_qx_trace_params(sigma_qx_scheme, ningroup):
     return sigma2_qx_trace_labels, n_sigma2_qx_parameters
     
 
+def build_group_id_coordinate(nxout, nbasis, inner_group_id):
+    """
+    Build the "group_id" output coordinate labelling each basis function's
+    sigma_qx country group (offset by 1, with 0 reserved for outer basis
+    functions), or all zeros when inner_group_id isn't set.
+
+    `inner_group_id` is only populated by sigma_qx_groups() when
+    config.sigma_qx == "inner outer country" -- for every other scheme
+    (including plain "inner outer") it's None regardless of nxout, in which
+    case there's no meaningful country grouping to label.
+    """
+    if inner_group_id is None:
+        return np.zeros(nbasis)
+
+    if nxout > 0:
+        return np.concatenate((np.zeros(nxout), inner_group_id + 1))
+
+    return inner_group_id
+
+
 def update_sigma2_qx(zmusample,
                      zmusample_out,
                      zmusample_in,   
@@ -208,7 +228,10 @@ def update_sigma2_qx(zmusample,
                 raise ValueError("Global sigma2_qx sampling currently requires kappa_xout_current and kappa_xin_current to be equal.")
             
     elif n_kappa_x_parameters == 1:
-        pass
+        # A single fixed/global kappa_x applies equally to outer and inner
+        # basis functions, so sigma_qx sampling (which may still be split
+        # "inner outer"/"inner outer country") uses the same value for both.
+        kappa_xout_current = kappa_xin_current
 
     else:
         raise ValueError("Currently kappa_x only setup for 1 or 2 parameters.")
@@ -269,7 +292,7 @@ def update_sigma2_qx(zmusample,
 
         sigma2_qx_bf_current[nxout:] = (sigma2_qxin_per_bf)
         
-        sigma2_qx_sample = np.concatenate((sigma2_qxout_current, sigma2_qxin_group_current))
+        sigma2_qx_sample = np.concatenate((np.atleast_1d(sigma2_qxout_current), sigma2_qxin_group_current))
 
     return sigma2_qx_sample, sigma2_qx_bf_current
 

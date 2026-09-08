@@ -66,6 +66,9 @@ class InversionParameters:
     kappa_bc: None = None
     kappa_r: float | None = 0.0
     min_group_size: int | None = 15
+    tau_resid: str | float | None = 0.0
+    tau_resid_prior: dict | None = None
+    tau_resid_max: float | None = 200
 
 
 def bristau_function(config: InversionParameters):
@@ -166,6 +169,9 @@ def bristau_function(config: InversionParameters):
         kappa_bc=config.kappa_bc,
         kappa_r=config.kappa_r,
         nxout=config.nxout,
+        tau_resid=config.tau_resid,
+        tau_resid_prior=config.tau_resid_prior,
+        tau_resid_max=config.tau_resid_max,
         )
 
     end_data = time.time()
@@ -178,14 +184,16 @@ def bristau_function(config: InversionParameters):
     start_haffbs = time.time()
 
         
-    (xtrace, 
-    bctrace, 
-    rtrace, 
-    var_rep_trace, 
-    sigma2_qx_trace, 
+    (xtrace,
+    bctrace,
+    rtrace,
+    var_rep_trace,
+    sigma2_qx_trace,
     kappa_x_trace,
     sigma2_qx_trace_labels,
-    kappa_x_trace_labels
+    kappa_x_trace_labels,
+    tau_trace,
+    tau_trace_labels,
     ) = augmented_ffbs_mxkf_gibbs_double_slice(inversion_input)
     
 
@@ -229,7 +237,9 @@ def bristau_function(config: InversionParameters):
                                           nbc=inversion_input.nbc,
                                           country_unit_prefix=config.country_unit_prefix,
                                           ningroup=ningroup,
-                                          inner_group_id=inner_group_id
+                                          inner_group_id=inner_group_id,
+                                          tau_trace=tau_trace,
+                                          tau_trace_labels=tau_trace_labels,
                                           )
 
 

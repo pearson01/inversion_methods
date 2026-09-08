@@ -6,7 +6,7 @@ import numpy as np
 from dataclasses import dataclass
 from scipy.linalg import cho_solve
 
-from inversion_methods.manipulation.matrix_identities import kalman_gain_woodbury_from_cholesky, covariance_from_woodbury_factor, _symmetrize_square, _cholesky_with_repair, _sample_gaussian_cholesky
+from inversion_methods.manipulation.matrix_identities import kalman_gain_woodbury_from_gram, covariance_from_woodbury_factor, _symmetrize_square, _cholesky_with_repair, _sample_gaussian_cholesky
 from inversion_methods.manipulation.lognormal_transformations import state_vector_mu_transform, build_Wb
 
 
@@ -32,12 +32,16 @@ class amxkf_inputs:
     kappa_r: float = 0.0
     nbc: int | None = None
     za_mu_warmstart: np.ndarray | None = None
+    err_var_dic: dict | None = None
+    Y_dic_raw: dict | None = None
+    Hz_dic_raw: dict | None = None
 
 
 @dataclass
 class abs_inputs:
     zf_mu: np.ndarray
-    Pf: np.ndarray
+    # Pf: np.ndarray
+    Pf_chol: np.ndarray
     za_mu: np.ndarray
     Pa: np.ndarray
     nperiod: int
@@ -321,22 +325,6 @@ def augmented_forecast_model(
     return zf_mu, Pf_aug
 
 
-def analysis_covariance_update(K, H_hat, Pf, r):
-    
-    KH = K @ H_hat
-    I_KH = np.eye(Pf.shape[0]) - KH
-
-    Pa = I_KH @ Pf @ I_KH.T
-
-    sqrt_r = np.sqrt(r)
-    K_sqrt_r = K * sqrt_r[np.newaxis, :]
-    Pa += K_sqrt_r @ K_sqrt_r.T
-
-    Pa = 0.5 * (Pa + Pa.T)
-
-    return Pa
-
-
 def iterative_analysis_update(zf_mu, za_mu_current, Y, r, r_inv, Pf, H, xprior, bcprior, rprior, nbasis, nbc, nr, max_inner_iters=5, tol=1e-02):
 
     """
@@ -400,15 +388,27 @@ def iterative_analysis_update(zf_mu, za_mu_current, Y, r, r_inv, Pf, H, xprior, 
 
     L, _, _ = _cholesky_with_repair(Pf)
 
+    HTrinv = H.T * r_inv[None,:]
+    G = HTrinv @ H
+    g = HTrinv @ Y
+
+
     for _ in range(max_inner_iters):
 
         z_lin = state_vector_mu_transform(za_mu_current, xprior, bcprior, rprior, nbasis, nbc, nr)
         Wb = build_Wb(z_lin, xprior, bcprior, rprior, nbasis, nbc)
-        H_hat = H @ Wb
 
-        d = Y - H @ z_lin - H_hat @ (zf_mu - za_mu_current)
-        K, S_factor = kalman_gain_woodbury_from_cholesky(L, H_hat, r_inv)
-        za_proposal = zf_mu + K @ d   # this is g(za_current)
+        # H.T @ diag(r_inv) @ d, not yet weighted by Wb, expanded via
+        #   d = Y - H @ z_lin - H_hat @ (zf_mu - za_mu_current)
+        #   H_hat = H @ diag(Wb)
+        # using only the precomputed G, g (both nz-dimensional), so
+        # the (ny, nz) observation operator H is never touched again
+        # inside this loop.
+        delta = zf_mu - za_mu_current
+        h = g - G @ (z_lin + Wb * delta)
+
+        Kd, S_factor = kalman_gain_woodbury_from_gram(L, G, Wb, h)
+        za_proposal = zf_mu + Kd   # this is g(za_current)
 
         f_curr = za_proposal - za_mu_current   # fixed-point residual
 
@@ -460,9 +460,20 @@ def iterative_analysis_update(zf_mu, za_mu_current, Y, r, r_inv, Pf, H, xprior, 
 
         za_mu_current = za_new
 
+    # Re-linearize at the final za_mu_current so that S_factor (and
+    # therefore Pa) is evaluated at the state that is actually
+    # returned, rather than at the iterate from before the loop's last
+    # update. This costs one more O(nz**3) Woodbury evaluation using
+    # the already-cached G, not a fresh O(ny * nz**2) pass through H.
+    z_lin = state_vector_mu_transform(za_mu_current, xprior, bcprior, rprior, nbasis, nbc, nr)
+    Wb = build_Wb(z_lin, xprior, bcprior, rprior, nbasis, nbc)
+    delta = zf_mu - za_mu_current
+    h = g - G @ (z_lin + Wb * delta)
+    _, S_factor = kalman_gain_woodbury_from_gram(L, G, Wb, h)
+
     Pa = covariance_from_woodbury_factor(L, S_factor)
 
-    return za_mu_current, Pa, converged
+    return za_mu_current, Pa, L, converged
 
 
 def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
@@ -489,6 +500,7 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
 
     zf_mu = np.zeros((config.nperiod, nz))
     Pf = np.zeros((config.nperiod, nz, nz))
+    Pf_chol = np.zeros((config.nperiod, nz, nz))
     za_mu = np.zeros((config.nperiod, nz))
     Pa = np.zeros((config.nperiod, nz, nz))
 
@@ -498,8 +510,16 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
     for t in range(config.nperiod):
         H = config.Hz_dic[t]
         Y = config.Y_dic[t]
-        sigma_obs = config.sigma_obs_dic[t]
-        err_var = config.sigma2_rep + sigma_obs**2
+
+        if config.err_var_dic is not None:
+            # Precomputed, e.g. by an AR(1)/OU residual-correlation whitening
+            # step. Falls back to the plain i.i.d. formula below when absent,
+            # so callers that don't use that feature are unaffected.
+            err_var = config.err_var_dic[t]
+        else:
+            sigma_obs = config.sigma_obs_dic[t]
+            err_var = config.sigma2_rep + sigma_obs**2
+
         err_var_inv = 1 / err_var
 
         if t == 0:
@@ -512,23 +532,33 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
             # zf_mu[t], Pf[t] = slow_augmented_forecast_model(za_mu[t-1], Pa[t-1], config.F_aug, Q_aug)
 
 
-        za_mu[t], Pa[t], converged = iterative_analysis_update(zf_mu[t], za_mu_current[t], Y, err_var, err_var_inv, Pf[t], H, config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr)
+        za_mu[t], Pa[t], Pf_chol[t], converged = iterative_analysis_update(zf_mu[t], za_mu_current[t], Y, err_var, err_var_inv, Pf[t], H, config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr)
         
         if converged:
             converge_count += 1
                 
 
     print(f"            {converge_count} convergences in {config.nperiod} MXKF time steps")
-    
+
+    # The backward sampler computes residuals (Y_dic - Hz_dic @ z) purely as a
+    # diagnostic fed to the sigma2_rep/sigma2_qx Gibbs updates. Those updates
+    # assume the residual's marginal variance is sigma2_rep + sigma_obs**2, so
+    # they need the *raw* (unwhitened) Y/Hz, not whatever was used internally
+    # above to drive the Kalman gain. Defaults to the same dict when no
+    # whitening is in use, i.e. unchanged behaviour.
+    Y_dic_for_residuals = config.Y_dic_raw if config.Y_dic_raw is not None else config.Y_dic
+    Hz_dic_for_residuals = config.Hz_dic_raw if config.Hz_dic_raw is not None else config.Hz_dic
+
     return abs_inputs(zf_mu=zf_mu,
-                         Pf=Pf,
+                        #  Pf=Pf,
+                         Pf_chol=Pf_chol,
                          za_mu=za_mu,
                          Pa=Pa,
                          kappa_xout=kappa_xout,
                          kappa_xin=kappa_xin,
                          nperiod=config.nperiod,
-                         Y_dic=config.Y_dic,
-                         Hz_dic=config.Hz_dic,
+                         Y_dic=Y_dic_for_residuals,
+                         Hz_dic=Hz_dic_for_residuals,
                          nbasis=config.nbasis,
                          nbc=config.nbc,
                          nxout=config.nxout,
@@ -693,7 +723,7 @@ def augmented_backward_sampler(
     # Cache state and covariance arrays
     # -------------------------------------------------------------
     Pa = np.asarray(config.Pa)
-    Pf = np.asarray(config.Pf)
+    Pf_chol = np.asarray(config.Pf_chol)
     za_mu = np.asarray(config.za_mu)
     zf_mu = np.asarray(config.zf_mu)
 
@@ -723,7 +753,7 @@ def augmented_backward_sampler(
     # -------------------------------------------------------------
     for t in range(nperiod - 2, -1, -1):
         Pa_t = Pa[t]
-        Pf_tp1 = Pf[t + 1]
+        Pf_factor = (Pf_chol[t + 1], True)
 
         # ---------------------------------------------------------
         # Structured calculation:
@@ -766,8 +796,8 @@ def augmented_backward_sampler(
         #
         #     A.T = solve(Pf_tp1, M1.T)
         # ---------------------------------------------------------
-        Pf_L, _, _ = _cholesky_with_repair(Pf_tp1)
-        Pf_factor = (Pf_L, True)
+        # Pf_L, _, _ = _cholesky_with_repair(Pf_tp1)
+        # Pf_factor = (Pf_L, True)
 
         A_transpose = cho_solve(Pf_factor, M1.T, overwrite_b=False, check_finite=False,)
 

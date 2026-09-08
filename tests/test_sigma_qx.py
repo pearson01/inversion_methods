@@ -166,6 +166,32 @@ def test_update_sigma2_qx_global_requires_matching_inner_outer_kappa():
         )
 
 
+def test_update_sigma2_qx_inner_outer_works_with_single_fixed_kappa():
+    """
+    Regression test: kappa_xout_current was only ever assigned inside the
+    n_kappa_x_parameters == 2 branch. With kappa_x fixed/global
+    (n_kappa_x_parameters == 1) and sigma_qx="inner outer" (or "inner outer
+    country"), the "inner outer" branch below referenced kappa_xout_current
+    unconditionally, raising UnboundLocalError. A single fixed/global kappa
+    should transparently serve as both the outer and inner value.
+    """
+    nxout, nxin = 2, 3
+    zmusample_out = _zmusample_with_reference(50, nxout, seed=2)
+    zmusample_in = _zmusample_with_reference(50, nxin, seed=3)
+    current = np.full(nxout + nxin, 0.02)
+
+    sample, updated = update_sigma2_qx(
+        zmusample=None, zmusample_out=zmusample_out, zmusample_in=zmusample_in,
+        sigma2_qx_aprior=2.0, sigma2_qx_bprior=2.0, nbasis=nxout + nxin, nxout=nxout, nxin=nxin,
+        sigma2_qx_max=0.5, sigma_qx_scheme="inner outer", sigma2_qx_bf_current=current,
+        fixed_sigma2_qx=None, inner_group_id=None, ningroup=None,
+        kappa_x_vector_current=np.array([0.3]), n_kappa_x_parameters=1,
+    )
+
+    assert sample.shape == (2,)
+    assert np.all(sample > 0) and np.all(sample <= 0.5)
+
+
 def test_update_sigma2_qx_inner_outer_returns_flat_array_matching_trace_shape():
     """
     Regression test: update_sigma2_qx's "inner outer" branch must return a
@@ -191,6 +217,36 @@ def test_update_sigma2_qx_inner_outer_returns_flat_array_matching_trace_shape():
     assert np.all(sample > 0) and np.all(sample <= 0.5)
     np.testing.assert_allclose(updated[:nxout], sample[0])
     np.testing.assert_allclose(updated[nxout:], sample[1])
+
+
+def test_update_sigma2_qx_inner_outer_country_returns_flat_array_matching_trace_shape():
+    """
+    Regression test: update_sigma2_qx's "inner outer country" branch builds
+    its outer contribution from `sample_sigma2_qx`, which returns a plain
+    scalar. `np.concatenate((scalar, group_array))` raises "zero-dimensional
+    arrays cannot be concatenated" -- this crashed a real production run
+    after `sample_sigma2_qx` was changed to return a scalar (fixing a
+    different shape bug in the "inner outer" branch) without updating this
+    branch to match.
+    """
+    nxout, nxin = 2, 4
+    ningroup = 2
+    inner_group_id = np.array([0, 0, 1, 1])
+    zmusample_out = _zmusample_with_reference(50, nxout, seed=6)
+    zmusample_in = _zmusample_with_reference(50, nxin, seed=7)
+    current = np.full(nxout + nxin, 0.02)
+
+    sample, updated = update_sigma2_qx(
+        zmusample=None, zmusample_out=zmusample_out, zmusample_in=zmusample_in,
+        sigma2_qx_aprior=2.0, sigma2_qx_bprior=2.0, nbasis=nxout + nxin, nxout=nxout, nxin=nxin,
+        sigma2_qx_max=0.5, sigma_qx_scheme="inner outer country", sigma2_qx_bf_current=current,
+        fixed_sigma2_qx=None, inner_group_id=inner_group_id, ningroup=ningroup,
+        kappa_x_vector_current=np.array([0.5, 0.5]), n_kappa_x_parameters=2,
+    )
+
+    assert sample.shape == (1 + ningroup,)  # outer + one value per inner group
+    assert np.all(sample > 0) and np.all(sample <= 0.5)
+    np.testing.assert_allclose(updated[:nxout], sample[0])
 
 
 def test_sample_sigma2_qx_returns_a_bounded_scalar():

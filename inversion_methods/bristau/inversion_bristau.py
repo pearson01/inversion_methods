@@ -8,9 +8,10 @@ from pandas import date_range, to_datetime
 from dataclasses import dataclass
 
 from inversion_methods.bristau.sigma_rep import update_sigma2_rep, sigma_rep_scheme_select
-from inversion_methods.bristau.siqma_qx import update_sigma2_qx, sigma_qx_scheme_select, initialise_sigma2_qx_vector, sigma_qx_trace_params
+from inversion_methods.bristau.siqma_qx import update_sigma2_qx, sigma_qx_scheme_select, initialise_sigma2_qx_vector, sigma_qx_trace_params, build_group_id_coordinate
 from inversion_methods.bristau.kappa_x import update_kappa_x, kappa_x_scheme_select, initialise_kappa_x_vector, kappa_x_trace_params, kappa_max
 from inversion_methods.bristau.bristau_filter_sampler import iterative_augmented_mxkf, augmented_backward_sampler, amxkf_inputs
+from inversion_methods.bristau.tau_resid import tau_scheme_select, tau_trace_params, initialise_tau, update_tau_resid, prepare_tau_resid_indexing, whiten_observations, prepare_tau_sampler_inputs, sample_tau
 
 from openghg_inversions import utils, convert
 from openghg_inversions.hbmcmc.hbmcmc_output import define_output_filename
@@ -52,7 +53,7 @@ class InversionInput:
     sigma_qbc: float | None = None
     sigma_qr: float | None = None
     kappa_x_prior: dict | None = None
-    iterations: int | None = None
+    iterations: int | None = 2500
     inner_group_id: np.ndarray | None = None
     ningroup: int | None = None
     sigma_rep: str | float | None = 'global additive'
@@ -63,6 +64,9 @@ class InversionInput:
     kappa_x_minfold: int | None = 1
     kappa_bc: None = None
     kappa_r: float | None = 0.0
+    tau_resid: str | float | None = 0.0
+    tau_resid_prior: dict | None = None
+    tau_resid_max: float | None = 200
 
 
 def bristau_monthly_dictionaries(config: MessyInput) -> InversionInput:
@@ -204,13 +208,24 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
     kappaintrace : ndarray
         Trace of inner kappa. Shape:
         (retained_iterations,).
+
+    tau_trace : ndarray
+        Trace of the AR(1)/OU same-site residual-correlation length (hours).
+        Shape: (retained_iterations, 1). Fixed at config.tau_resid (0.0 by
+        default, disabling the feature) when config.tau_resid is numeric.
+
+    tau_trace_labels : list[str]
+        Labels for the columns of tau_trace.
     """
 
     # ------------------------------------------------------------------
     # Configuration and validation
     # ------------------------------------------------------------------
 
-    burn = int(0.2 * config.iterations)
+    if config.iterations > 1000:
+        burn = 500
+    else:
+        burn = int(0.2 * config.iterations)
 
     nxout = config.nxout
     nxin = config.nbasis - nxout
@@ -218,8 +233,32 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
     sigma_rep_scheme, fixed_sigma2_rep = sigma_rep_scheme_select(config)
     sigma_qx_scheme, fixed_sigma2_qx, ningroup, inner_group_id = sigma_qx_scheme_select(config, nxin)
     kappa_x_scheme, fixed_kappa_x = kappa_x_scheme_select(config)
+    tau_scheme, fixed_tau = tau_scheme_select(config)
 
     sigma_obs = np.concatenate([config.sigma_obs_dic[t] for t in range(config.nperiod)])
+
+    # ------------------------------------------------------------------
+    # AR(1)/OU same-site residual-correlation setup
+    #
+    # This depends only on the fixed Y/Hz/Ytime/siteindicator data, not on
+    # any Gibbs-sampled hyperparameter, so it is computed once here rather
+    # than once per iteration. With tau_scheme == "fixed" and
+    # config.tau_resid == 0.0 (the default), whiten_observations() below is
+    # a no-op and reproduces the previous behaviour exactly.
+    # ------------------------------------------------------------------
+
+    (obs_prev_Y_dic, obs_prev_H_dic, obs_gap_dic, obs_has_prev_dic,
+     obs_gap_flat, obs_prev_index_flat) = prepare_tau_resid_indexing(
+        config.Y_dic, config.Hz_dic, config.Ytime_dic, config.siteindicator_dic, config.nperiod,
+    )
+
+    if tau_scheme != "fixed":
+        tau_aprior, tau_bprior = prior_parser(config.tau_resid_prior)
+        tau_max = config.tau_resid_max
+    else:
+        tau_aprior = None
+        tau_bprior = None
+        tau_max = None
 
     # ------------------------------------------------------------------
     # Priors
@@ -302,6 +341,10 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
 
     kappa_x_trace = np.zeros((config.iterations, n_kappa_x_parameters), dtype=float,)
 
+    tau_trace_labels, n_tau_parameters = tau_trace_params(tau_scheme)
+
+    tau_trace = np.zeros((config.iterations, n_tau_parameters), dtype=float,)
+
     za_mu_prev = None
 
     # ------------------------------------------------------------------
@@ -321,6 +364,9 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
 
     kappa_x_vector_current = initialise_kappa_x_vector(kappa_x_scheme, fixed_kappa_x, initial_kappa_x, n_kappa_x_parameters)
 
+    initial_tau = 6.0
+
+    tau_current = initialise_tau(tau_scheme, fixed_tau, initial_tau)
 
     # ------------------------------------------------------------------
     # Gibbs iterations
@@ -329,7 +375,7 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
     for i in range(config.iterations):
 
         print(
-            f"Iteration: {i}, sigma2_rep: {sigma2_rep_current}, sigma2_qx min/max: ({sigma2_qx_bf_current.min()}, {sigma2_qx_bf_current.max()}), kappa_x: ({kappa_x_vector_current})", flush=True,)
+            f"Iteration: {i}, sigma2_rep: {sigma2_rep_current}, sigma2_qx min/max: ({sigma2_qx_bf_current.min()}, {sigma2_qx_bf_current.max()}), kappa_x: ({kappa_x_vector_current}), tau_resid: {tau_current}", flush=True,)
 
         # --------------------------------------------------------------
         # Construct initial-state prior variances
@@ -374,11 +420,22 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         # Forward filter
         # --------------------------------------------------------------
 
+        # AR(1)/OU residual-correlation whitening. tau_current only changes
+        # once per iteration (below), and Y_dic/Hz_dic never change, so this
+        # is the only place this needs recomputing. A no-op (identical
+        # Y/Hz, err_var == sigma2_rep + sigma_obs**2) whenever tau_current
+        # is 0, i.e. whenever this feature isn't in use.
+        Y_dic_whitened, Hz_dic_whitened, err_var_dic = whiten_observations(
+            config.Y_dic, config.Hz_dic, config.sigma_obs_dic,
+            obs_prev_Y_dic, obs_prev_H_dic, obs_gap_dic, obs_has_prev_dic,
+            sigma2_rep_current, tau_current, config.nperiod,
+        )
+
         filter_inputs = amxkf_inputs(
-            Y_dic=config.Y_dic,
+            Y_dic=Y_dic_whitened,
             sigma_obs_dic=config.sigma_obs_dic,
             Ytime_dic=config.Ytime_dic,
-            Hz_dic=config.Hz_dic,
+            Hz_dic=Hz_dic_whitened,
             siteindicator_dic=config.siteindicator_dic,
             nbasis=config.nbasis,
             zprior_mus=zprior_mus,
@@ -394,6 +451,9 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
             nr=config.nr,
             nxout=nxout,
             za_mu_warmstart=za_mu_prev,
+            err_var_dic=err_var_dic,
+            Y_dic_raw=config.Y_dic,
+            Hz_dic_raw=config.Hz_dic,
         )
 
         sampler_inputs = iterative_augmented_mxkf(filter_inputs)
@@ -422,6 +482,14 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         sigma2_rep_current = update_sigma2_rep(state_residuals, sigma_obs, sigma2_rep_aprior, sigma2_rep_bprior, sigma2_rep_max, sigma_rep_scheme, sigma2_rep_current, fixed_sigma2_rep)
 
         var_rep_trace[i] = sigma2_rep_current
+
+        # --------------------------------------------------------------
+        # Update tau (AR(1)/OU same-site residual-correlation length)
+        # --------------------------------------------------------------
+        
+        tau_current = update_tau_resid(state_residuals, sigma_obs, tau_aprior, tau_bprior, tau_max, tau_scheme, tau_current, fixed_tau, sigma2_rep_current, obs_prev_index_flat, obs_gap_flat)
+
+        tau_trace[i] = tau_current
 
         # --------------------------------------------------------------
         # Optional state split
@@ -494,7 +562,9 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         sigma2_qx_trace[burn:],
         kappa_x_trace[burn:],
         sigma2_qx_trace_labels,
-        kappa_x_trace_labels
+        kappa_x_trace_labels,
+        tau_trace[burn:],
+        tau_trace_labels,
     )
 
 
@@ -530,12 +600,13 @@ class PostProcessInput:
     nr: int
     inner_group_id: np.ndarray
     country_unit_prefix: str | None
-    nbc: int | None = None        
+    nbc: int | None = None
     bctrace: np.ndarray | None = None
     bcprior: dict | None = None
     Hbc_dic: dict | None = None
     ningroup: int | None = None
-
+    tau_trace: np.ndarray | None = None
+    tau_trace_labels: list[str] | None = None
 
 
 def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
@@ -770,11 +841,7 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
             
     Ymod = np.concatenate(list(Ymod_dic.values()))
 
-    if config.nxout > 0:
-        nxout_zeros = np.zeros(config.nxout)
-        all_group_id = np.concatenate((nxout_zeros, config.inner_group_id + 1))
-    else:
-        all_group_id = config.inner_group_id
+    all_group_id = build_group_id_coordinate(config.nxout, config.nbasis, config.inner_group_id)
 
 
     # Make output netcdf file
@@ -828,6 +895,10 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "periodstart": ("period", date_range(to_datetime(config.start_date), to_datetime(config.end_date), freq="MS")[:-1]),
         }
 
+    if config.tau_trace is not None:
+        data_vars["tau_trace"] = (["stepnum", "gtau"], config.tau_trace)
+        coords["taugroup"] = ("gtau", config.tau_trace_labels)
+
     if config.nbc:
 
         Ymodbc = np.concatenate(list(Ymodbc_dic.values()))
@@ -877,6 +948,9 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     outds.sigma2_qx_trace.attrs["longname"] = "trace for the state forecast model error variance of each bf group"
     outds.kappa_x_trace.attrs["longname"] = "trace for the state persistance terms"
 
+    if config.tau_trace is not None:
+        outds.tau_trace.attrs["longname"] = "trace for the AR(1)/OU same-site residual-correlation length"
+        outds.tau_trace.attrs["units"] = "hours"
 
     if config.nbc:
         outds.YmodBC.attrs["units"] = obs_units + " " + "mol/mol"
