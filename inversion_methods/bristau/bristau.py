@@ -3,7 +3,7 @@ from dataclasses import dataclass, replace
 
 from inversion_methods.bristau.siqma_qx import sigma_qx_groups
 from inversion_methods.bristau.data_bristau import DataConfig, extract_data, build_cntryds
-from inversion_methods.bristau.inversion_bristau import bristau_monthly_dictionaries, augmented_ffbs_mxkf_gibbs_double_slice, haffbs_postprocessouts, MessyInput, PostProcessInput
+from inversion_methods.bristau.inversion_bristau import bristau_monthly_dictionaries, augmented_ffbs_mxkf_gibbs_double_slice, bristau_postprocessouts, MessyInput, PostProcessInput
 
 
 @dataclass
@@ -243,7 +243,7 @@ def bristau_function(config: InversionParameters):
                                           )
 
 
-    outsds = haffbs_postprocessouts(post_process_input)
+    outsds = bristau_postprocessouts(post_process_input)
 
     end_post = time.time()
 

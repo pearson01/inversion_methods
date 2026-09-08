@@ -609,7 +609,7 @@ class PostProcessInput:
     tau_trace_labels: list[str] | None = None
 
 
-def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
+def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     r"""Takes the output from inferpymc function, along with some other input
     information, calculates statistics on them and places it all in a dataset.
     Also calculates statistics on posterior emissions for the countries in
@@ -768,24 +768,20 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     flux_array_all = np.moveaxis(flux_array_all, smallest_dim_position, -1)
     # end HACK
 
+    allmonth = date_range(config.start_date, config.end_date, freq="MS")[:-1]
+
+    apriori_flux = np.zeros((*flux_array_all.shape[:2], config.nperiod))
     if flux_array_all.shape[2] == 1:
-        print("\nAssuming flux prior is annual and extracting first index of flux array.")
-        apriori_flux = flux_array_all[:, :, 0]
+        print("\nAssuming flux prior is annual and using it for every period.")
+        apriori_flux[:, :, :] = flux_array_all[:, :, [0]]
     else:
-        print("\nAssuming flux prior is monthly.")
-        print(f"Extracting weighted average flux prior from {config.start_date} to {config.end_date}")
-        allmonths = date_range(config.start_date, config.end_date).month[:-1].values
-        allmonths -= 1  # to align with zero indexed array
-
-        apriori_flux = np.zeros_like(flux_array_all[:, :, 0])
-
-        # calculate the weighted average flux across the whole inversion period
-        for m in np.unique(allmonths):
-            apriori_flux += flux_array_all[:, :, m] * np.sum(allmonths == m) / len(allmonths)
+        print("\nAssuming flux prior is a calendar-month climatology.")
+        for period, timestamp in enumerate(allmonth):
+            apriori_flux[:, :, period] = flux_array_all[:, :, timestamp.month - 1]
 
     flux = np.zeros_like(scalemap)
     for period in np.arange(config.nperiod):
-        flux[:, :, period] = scalemap[:, :, period] * apriori_flux
+        flux[:, :, period] = scalemap[:,:,period] * apriori_flux[:,:,period]
 
     # Basis functions to save
     bfarray = bfds.values - 1
@@ -818,7 +814,7 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     steps= len(config.var_rep_trace)
 
     for period in np.arange(config.nperiod):
-        
+        apriori_flux_period = apriori_flux[:,:,period]
         for ci, cntry in enumerate(cntrynames):
             cntrytottrace = np.zeros(steps)
             cntrytotprior = 0
@@ -826,7 +822,7 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
                 bothinds = np.logical_and(cntrygrid == ci, bfarray == bf)
 
                 weight_bf = (
-                np.sum(area[bothinds].ravel() * apriori_flux[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
+                np.sum(area[bothinds].ravel() * apriori_flux_period[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
                 / unit_factor
                 )
 
@@ -863,7 +859,7 @@ def haffbs_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         "sitenames": (["nsite"], config.sites),
         "sitelons": (["nsite"], site_lon),
         "sitelats": (["nsite"], site_lat),
-        "fluxapriori": (["lat", "lon"], apriori_flux),
+        "fluxapriori": (["lat", "lon", "period"], apriori_flux),
         "basisfunctions": (["lat", "lon"], bfarray),
         "countrydefinition": (["lat", "lon"], cntrygrid),
         "xsensitivity": (["nmeasure", "bf"], Hx),
