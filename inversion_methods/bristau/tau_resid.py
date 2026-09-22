@@ -209,9 +209,9 @@ def prepare_tau_sampler_inputs(state_residuals, sigma_obs, sigma2_rep, prev_inde
     return standardised, prev_standardised, has_prev
 
 
-def update_tau_resid(state_residuals, sigma_obs, tau_aprior, tau_bprior, tau_max, tau_scheme, tau_current, fixed_tau, sigma2_rep_current, obs_prev_index_flat, obs_gap_flat):
-        
-        
+def update_tau_resid(state_residuals, sigma_obs, tau_aprior, tau_bprior, tau_max, tau_scheme, tau_current, fixed_tau, sigma2_rep_current, obs_prev_index_flat, obs_gap_flat, rng=None):
+
+
     if tau_scheme == "fixed":
             tau_current = fixed_tau
     else:
@@ -220,7 +220,7 @@ def update_tau_resid(state_residuals, sigma_obs, tau_aprior, tau_bprior, tau_max
         )
         tau_current = sample_tau(
             tau_current, tau_max, standardised, prev_standardised, has_prev,
-            obs_gap_flat, tau_aprior, tau_bprior,
+            obs_gap_flat, tau_aprior, tau_bprior, rng=rng,
             )
     return tau_current
 
@@ -251,10 +251,18 @@ def tau_log_posterior(log_tau, tau_max, standardised, prev_standardised, has_pre
     return loglik + logprior + log_tau  # Jacobian for tau = exp(log_tau)
 
 
-def sample_tau(tau_current, tau_max, standardised, prev_standardised, has_prev, gap, alpha_prior, beta_prior, w=1.0, m=100):
+def sample_tau(tau_current, tau_max, standardised, prev_standardised, has_prev, gap, alpha_prior, beta_prior, w=1.0, m=100, rng=None):
     """
     Slice sampler for tau, directly analogous to sigma_rep.sample_sigma2_rep.
+
+    rng : numpy.random.Generator, optional
+        Source of randomness for this draw. Defaults to plain
+        `numpy.random` (today's exact behaviour) when not supplied; pass a
+        seeded Generator for a reproducible chain.
     """
+    if rng is None:
+        rng = np.random
+
     s_current = np.log(tau_current)
     s_upper = np.log(tau_max)
 
@@ -263,14 +271,14 @@ def sample_tau(tau_current, tau_max, standardised, prev_standardised, has_prev, 
 
     logp = lambda s: tau_log_posterior(s, tau_max, standardised, prev_standardised, has_prev, gap, alpha_prior, beta_prior)
 
-    logy = logp(s_current) - np.random.exponential(1)
+    logy = logp(s_current) - rng.exponential(1)
 
-    u = np.random.rand()
+    u = rng.uniform()
     L = s_current - w * u
     R = L + w
     R = min(R, s_upper)
 
-    j = int(np.floor(m * np.random.rand()))
+    j = int(np.floor(m * rng.uniform()))
     k = (m - 1) - j
 
     while j > 0 and logp(L) > logy:
@@ -283,7 +291,7 @@ def sample_tau(tau_current, tau_max, standardised, prev_standardised, has_prev, 
         k -= 1
 
     while True:
-        s_new = np.random.uniform(L, R)
+        s_new = rng.uniform(L, R)
 
         if logp(s_new) > logy:
             return np.exp(s_new)

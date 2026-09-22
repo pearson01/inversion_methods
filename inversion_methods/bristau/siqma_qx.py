@@ -199,20 +199,21 @@ def build_group_id_coordinate(nxout, nbasis, inner_group_id):
 
 def update_sigma2_qx(zmusample,
                      zmusample_out,
-                     zmusample_in,   
-                     sigma2_qx_aprior, 
-                     sigma2_qx_bprior, 
-                     nbasis, 
-                     nxout, 
-                     nxin, 
-                     sigma2_qx_max, 
-                     sigma_qx_scheme, 
-                     sigma2_qx_bf_current, 
-                     fixed_sigma2_qx, 
-                     inner_group_id, 
+                     zmusample_in,
+                     sigma2_qx_aprior,
+                     sigma2_qx_bprior,
+                     nbasis,
+                     nxout,
+                     nxin,
+                     sigma2_qx_max,
+                     sigma_qx_scheme,
+                     sigma2_qx_bf_current,
+                     fixed_sigma2_qx,
+                     inner_group_id,
                      ningroup,
                      kappa_x_vector_current,
                      n_kappa_x_parameters,
+                     rng=None,
                      ):
     
 
@@ -256,16 +257,16 @@ def update_sigma2_qx(zmusample,
         else:
             zmusample_global = np.column_stack((inner_deviations, zero_reference,))
 
-        sigma2_qx_global_current = sample_sigma2_qx(zmusample_global, kappa_xin_current, sigma2_qx_aprior, sigma2_qx_bprior, nbasis, sigma2_qx_max,)
+        sigma2_qx_global_current = sample_sigma2_qx(zmusample_global, kappa_xin_current, sigma2_qx_aprior, sigma2_qx_bprior, nbasis, sigma2_qx_max, rng=rng,)
 
         sigma2_qx_bf_current.fill(sigma2_qx_global_current)
 
         sigma2_qx_sample = (sigma2_qx_global_current)
 
     elif sigma_qx_scheme == "inner outer":
-        sigma2_qxout_current = sample_sigma2_qx(zmusample_out, kappa_xout_current, sigma2_qx_aprior, sigma2_qx_bprior, nxout, sigma2_qx_max,)
+        sigma2_qxout_current = sample_sigma2_qx(zmusample_out, kappa_xout_current, sigma2_qx_aprior, sigma2_qx_bprior, nxout, sigma2_qx_max, rng=rng,)
 
-        sigma2_qxin_current = sample_sigma2_qx(zmusample_in, kappa_xin_current, sigma2_qx_aprior, sigma2_qx_bprior, nxin, sigma2_qx_max,)
+        sigma2_qxin_current = sample_sigma2_qx(zmusample_in, kappa_xin_current, sigma2_qx_aprior, sigma2_qx_bprior, nxin, sigma2_qx_max, rng=rng,)
 
         sigma2_qx_bf_current[:nxout] = (sigma2_qxout_current)
 
@@ -274,7 +275,7 @@ def update_sigma2_qx(zmusample,
         sigma2_qx_sample = np.array([sigma2_qxout_current, sigma2_qxin_current,], dtype=float,)
 
     elif sigma_qx_scheme == "inner outer country":
-        sigma2_qxout_current = sample_sigma2_qx(zmusample_out, kappa_xout_current, sigma2_qx_aprior, sigma2_qx_bprior, nxout, sigma2_qx_max,)
+        sigma2_qxout_current = sample_sigma2_qx(zmusample_out, kappa_xout_current, sigma2_qx_aprior, sigma2_qx_bprior, nxout, sigma2_qx_max, rng=rng,)
 
         (sigma2_qxin_per_bf, sigma2_qxin_group_current,) = sample_sigma2_qx_grouped(zmusample_in,
                                                                                     kappa_xin_current,
@@ -282,7 +283,8 @@ def update_sigma2_qx(zmusample,
                                                                                     sigma2_qx_bprior,
                                                                                     inner_group_id,
                                                                                     ningroup,
-                                                                                    sigma2_qx_max,)
+                                                                                    sigma2_qx_max,
+                                                                                    rng=rng,)
 
         sigma2_qxin_per_bf = np.asarray(sigma2_qxin_per_bf, dtype=float,)
 
@@ -298,29 +300,36 @@ def update_sigma2_qx(zmusample,
 
 
 
-def sample_sigma2_qx(zmusample, kappa_x, alpha_prior, beta_prior, nbasis, sigma2_qx_max=0.5):
+def sample_sigma2_qx(zmusample, kappa_x, alpha_prior, beta_prior, nbasis, sigma2_qx_max=0.5, rng=None):
 
     """
     Conjugate update to generate samples from the truncated inverse-gamma posterior of the forecast model noise variance for the emission fluxes x.
 
 
     x_bc and x_r are treated as fixed currently and so this sampler only works for sigma2_qx.
+
+    rng : numpy.random.Generator, optional
+        Source of randomness for this draw. Defaults to plain
+        `numpy.random` (today's exact behaviour) when not supplied; pass a
+        seeded Generator for a reproducible chain.
     """
+    if rng is None:
+        rng = np.random
 
     xr_prev = zmusample[:-1, -1][:, None]
     x_pred = kappa_x * zmusample[:-1, :nbasis] + (1 - kappa_x) * xr_prev
-    
+
     x_innov = zmusample[1:,:nbasis] - x_pred
     shape = alpha_prior + 0.5 * x_innov.size
     scale = beta_prior + 0.5 * np.sum(x_innov**2)
 
     F_max = invgamma.cdf(sigma2_qx_max, a=shape, scale=scale)
-    sigma2_qx_sample = invgamma.ppf(np.random.uniform(0, F_max), a=shape, scale=scale)
+    sigma2_qx_sample = invgamma.ppf(rng.uniform(0, F_max), a=shape, scale=scale)
 
     return float(sigma2_qx_sample)
 
 
-def sample_sigma2_qx_grouped(zmusample_in, kappa_xin, alpha_prior, beta_prior, group_id, ngroup, sigma2_qx_max=0.5):
+def sample_sigma2_qx_grouped(zmusample_in, kappa_xin, alpha_prior, beta_prior, group_id, ngroup, sigma2_qx_max=0.5, rng=None):
 
     """
     Group-wise conjugate update for sigma2_qxin.
@@ -350,7 +359,7 @@ def sample_sigma2_qx_grouped(zmusample_in, kappa_xin, alpha_prior, beta_prior, g
     for g in range(ngroup):
         cols = np.where(group_id == g)[0]
         sub = np.column_stack((zmusample_in[:, cols], zmusample_in[:, -1]))
-        sigma2_qxin_group[g] = sample_sigma2_qx(sub, kappa_xin, alpha_prior, beta_prior, len(cols), sigma2_qx_max)
+        sigma2_qxin_group[g] = sample_sigma2_qx(sub, kappa_xin, alpha_prior, beta_prior, len(cols), sigma2_qx_max, rng=rng)
 
     sigma2_qxin_per_bf = sigma2_qxin_group[group_id]
 

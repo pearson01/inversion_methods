@@ -198,7 +198,7 @@ def test_update_sigma2_qx_inner_outer_returns_flat_array_matching_trace_shape():
     (2,) array -- that's what `sigma2_qx_trace[i] = sample` expects. If
     `sample_sigma2_qx` still returns a 1-element array instead of a scalar,
     this comes back as (2, 1) and the assignment in
-    augmented_ffbs_mxkf_gibbs_double_slice raises a broadcast ValueError.
+    augmented_ffbs_mxkf_gibbs_multi_slice raises a broadcast ValueError.
     """
     nxout, nxin = 2, 3
     zmusample_out = _zmusample_with_reference(50, nxout, seed=2)

@@ -56,7 +56,7 @@ not supplied there must be present in the configuration file.
 
 ### Technical summary
 
-The core sampler is `augmented_ffbs_mxkf_gibbs_double_slice` in
+The core sampler is `augmented_ffbs_mxkf_gibbs_multi_slice` in
 [inversion_bristau.py](inversion_methods/bristau/inversion_bristau.py), a Gibbs sampler that
 alternates between an augmented Kalman filter/smoother sweep over the state and conjugate/slice
 updates of the model hyperparameters, for `config.iterations` iterations with the first 20% (fixed

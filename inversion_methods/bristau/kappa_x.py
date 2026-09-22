@@ -72,17 +72,18 @@ def initialise_kappa_x_vector(kappa_x_scheme, fixed_kappa_x, initial_kappa_x, n_
 def update_kappa_x(zmusample,
                    zmusample_out,
                    zmusample_in,
-                   sigma2_qx_bf_current, 
-                   kappa_x_aprior, 
-                   kappa_x_bprior, 
+                   sigma2_qx_bf_current,
+                   kappa_x_aprior,
+                   kappa_x_bprior,
                    nxout,
                    nxin,
-                   kappa_x_max, 
+                   kappa_x_max,
                    kappa_x_scheme,
-                   kappa_x_vector_current, 
-                   fixed_kappa_x, 
+                   kappa_x_vector_current,
+                   fixed_kappa_x,
+                   rng=None,
                    ):
-    
+
 
     if kappa_x_scheme == "fixed":
 
@@ -90,14 +91,14 @@ def update_kappa_x(zmusample,
 
     elif kappa_x_scheme == "global" and nxout == 0:
 
-        kappa_x_sample = sample_kappa(zmusample, sigma2_qx_bf_current, kappa_x_vector_current, kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxin)
+        kappa_x_sample = sample_kappa(zmusample, sigma2_qx_bf_current, kappa_x_vector_current, kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxin, rng=rng)
 
     elif kappa_x_scheme == "inner outer" and nxout > 0:
 
         kappa_x_sample = np.zeros_like(kappa_x_vector_current)
 
-        kappa_x_sample[0] = sample_kappa(zmusample_out, sigma2_qx_bf_current[:nxout], kappa_x_vector_current[0], kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxout)
-        kappa_x_sample[1] = sample_kappa(zmusample_in, sigma2_qx_bf_current[nxout:], kappa_x_vector_current[1], kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxin)
+        kappa_x_sample[0] = sample_kappa(zmusample_out, sigma2_qx_bf_current[:nxout], kappa_x_vector_current[0], kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxout, rng=rng)
+        kappa_x_sample[1] = sample_kappa(zmusample_in, sigma2_qx_bf_current[nxout:], kappa_x_vector_current[1], kappa_x_max, kappa_x_aprior, kappa_x_bprior, nxin, rng=rng)
 
     else:
 
@@ -196,11 +197,19 @@ def sample_kappa(
     kappa_bprior,
     nbasis,
     w=0.05,
-    m=100
+    m=100,
+    rng=None,
 ):
     """
     Slice sampler for a scalar kappa_x given x, r, and basis-specific sigma2_qx.
+
+    rng : numpy.random.Generator, optional
+        Source of randomness for this draw. Defaults to plain
+        `numpy.random` (today's exact behaviour) when not supplied; pass a
+        seeded Generator for a reproducible chain.
     """
+    if rng is None:
+        rng = np.random
 
     xmusample = zmusample[:, :nbasis]
     rmusample = zmusample[:, -1:]   # keep as (T,1) for broadcasting
@@ -210,16 +219,16 @@ def sample_kappa(
     dev_prev = xmu_dev[:-1]
     dev_curr = xmu_dev[1:]
 
-    logy = kappa_log_posterior(kappa_current, kappa_max, dev_curr, dev_prev, rmusample, sigma2_qx_bf_current, kappa_aprior, kappa_bprior) + np.log(np.random.rand())
+    logy = kappa_log_posterior(kappa_current, kappa_max, dev_curr, dev_prev, rmusample, sigma2_qx_bf_current, kappa_aprior, kappa_bprior) + np.log(rng.uniform())
 
-    u = np.random.rand()
+    u = rng.uniform()
     L = kappa_current - w * u
     R = L + w
 
     L = max(L, 0.0)
     R = min(R, kappa_max)
 
-    j = int(np.floor(m * np.random.rand()))
+    j = int(np.floor(m * rng.uniform()))
     k = (m - 1) - j
 
     while (
@@ -247,7 +256,7 @@ def sample_kappa(
         k -= 1
 
     while True:
-        kappa_new = np.random.uniform(L, R)
+        kappa_new = rng.uniform(L, R)
 
         if (
             kappa_log_posterior(

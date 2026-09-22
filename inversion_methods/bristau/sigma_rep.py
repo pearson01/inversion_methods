@@ -34,21 +34,22 @@ def sigma_rep_scheme_select(config):
 
 def update_sigma2_rep(state_residuals,
                    sigma_obs,
-                   sigma2_rep_aprior, 
-                   sigma2_rep_bprior, 
-                   sigma2_rep_max, 
+                   sigma2_rep_aprior,
+                   sigma2_rep_bprior,
+                   sigma2_rep_max,
                    sigma_rep_scheme,
                    sigma2_rep_current,
-                   fixed_sigma2_rep, 
+                   fixed_sigma2_rep,
+                   rng=None,
                    ):
-    
+
     if sigma_rep_scheme == "fixed additive":
 
         sigma2_rep_sample = fixed_sigma2_rep
 
     elif sigma_rep_scheme == "global additive":
 
-        sigma2_rep_sample = sample_sigma2_rep(sigma2_rep_current, state_residuals**2, sigma_obs, sigma2_rep_aprior, sigma2_rep_bprior, sigma2_rep_max)
+        sigma2_rep_sample = sample_sigma2_rep(sigma2_rep_current, state_residuals**2, sigma_obs, sigma2_rep_aprior, sigma2_rep_bprior, sigma2_rep_max, rng=rng)
 
     return sigma2_rep_sample
 
@@ -121,12 +122,23 @@ def sigma2_rep_log_posterior(s_current, r2, sigma_obs, alpha_prior, beta_prior, 
 
 
 
-def sample_sigma2_rep(sigma2_rep_current, r2, sigma_obs, alpha_prior, beta_prior, sigma2_rep_max, w=1.0, m=100):
+def sample_sigma2_rep(sigma2_rep_current, r2, sigma_obs, alpha_prior, beta_prior, sigma2_rep_max, w=1.0, m=100, rng=None):
 
     """
     Slice sampler generating samples from the posterior of sigma2_rep. Slice sampler required as conjugacy broken as sigma2_rep appears as a component of the sum
     of the likelihood denominator - no closed form.
+
+    rng : numpy.random.Generator, optional
+        Source of randomness for this draw. If not supplied (the default),
+        this falls back to plain `numpy.random`, exactly as it always has --
+        so passing nothing here is a complete no-op change. Pass an
+        explicit, seeded Generator (e.g. `numpy.random.default_rng(seed)`)
+        to make this draw -- and therefore the whole chain that keeps
+        calling it -- reproducible.
     """
+
+    if rng is None:
+        rng = np.random
 
     s_current = np.log(sigma2_rep_current)
     s_upper = np.log(sigma2_rep_max)
@@ -137,17 +149,17 @@ def sample_sigma2_rep(sigma2_rep_current, r2, sigma_obs, alpha_prior, beta_prior
 
     logp = lambda s: sigma2_rep_log_posterior(s, r2, sigma_obs, alpha_prior, beta_prior, sigma2_rep_max)
 
-    logy = logp(s_current) - np.random.exponential(1)
+    logy = logp(s_current) - rng.exponential(1)
 
     # initial bracket
-    u = np.random.rand()
+    u = rng.uniform()
     L = s_current - w * u
     R = L + w
 
     R = min(R, s_upper)
 
     # step out
-    j = int(np.floor(m * np.random.rand()))
+    j = int(np.floor(m * rng.uniform()))
     k = (m - 1) - j
 
     while j > 0 and logp(L) > logy:
@@ -161,7 +173,7 @@ def sample_sigma2_rep(sigma2_rep_current, r2, sigma_obs, alpha_prior, beta_prior
 
     # shrinkage
     while True:
-        s_new = np.random.uniform(L, R)
+        s_new = rng.uniform(L, R)
 
         if logp(s_new) > logy:
             return np.exp(s_new)

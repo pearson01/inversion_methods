@@ -3,7 +3,8 @@ from dataclasses import dataclass, replace
 
 from inversion_methods.bristau.siqma_qx import sigma_qx_groups
 from inversion_methods.bristau.data_bristau import DataConfig, extract_data, build_cntryds
-from inversion_methods.bristau.inversion_bristau import bristau_monthly_dictionaries, augmented_ffbs_mxkf_gibbs_double_slice, bristau_postprocessouts, MessyInput, PostProcessInput
+from inversion_methods.bristau.inversion_bristau import bristau_monthly_dictionaries, bristau_postprocessouts, MessyInput, PostProcessInput
+from inversion_methods.bristau.multichain import run_chains
 
 
 @dataclass
@@ -69,6 +70,35 @@ class InversionParameters:
     tau_resid: str | float | None = 0.0
     tau_resid_prior: dict | None = None
     tau_resid_max: float | None = 200
+
+    # --- Multi-chain convergence checking (see multichain.py) -----------
+    # nchain (int): Number of independent copies of the Gibbs sampler to run.
+    #               1 (the default) just runs the sampler once. Set to e.g. 4 to also get a
+    #               convergence check: all nchain chains are run in parallel and compared against each
+    #               other, but only one chain's output is actually kept and
+    #               saved -- the rest are used only to check agreement, then
+    #               discarded.
+    # chain_seed (int / optional): Fixes every random draw the sampler makes
+    #               (the emissions state and every hyperparameter alike), so
+    #               the exact same run -- or, with nchain>1, the exact same
+    #               set of chains -- can be reproduced later. Leave as None
+    #               (the default) for a fresh, genuinely random run every
+    #               time. Applies whether nchain is 1 or greater than 1.
+    # rhat_threshold (float): How strict the convergence check is. Chains are
+    #               judged to disagree if their worst "R-hat" value (a
+    #               standard MCMC convergence statistic; 1.0 is perfect
+    #               agreement) is at or above this. 1.01 is a commonly used,
+    #               fairly strict, default.
+    # require_convergence (bool): What to do if the chains fail the check.
+    #               False (the default) prints a loud warning but still
+    #               completes the run and writes output -- useful while you
+    #               are still finding out how often/how badly this happens.
+    #               True instead stops the run with an error and produces no
+    #               output at all if the chains disagree.
+    nchain: int = 1
+    chain_seed: int | None = None
+    rhat_threshold: float = 1.01
+    require_convergence: bool = False
 
 
 def bristau_function(config: InversionParameters):
@@ -183,7 +213,22 @@ def bristau_function(config: InversionParameters):
 
     start_haffbs = time.time()
 
-        
+
+    # run_chains() runs the Gibbs sampler once (config.nchain=1, the
+    # default) or as several independent chains that get compared against
+    # each other as a convergence check (config.nchain>1) -- see
+    # multichain.py for the full explanation. Either way, `gibbs_output`
+    # below is exactly the tuple the sampler itself produces, so nothing
+    # past this point needs to know or care which case happened.
+    # `convergence_report` is None unless config.nchain>1.
+    gibbs_output, convergence_report = run_chains(
+        inversion_input,
+        nchain=config.nchain,
+        chain_seed=config.chain_seed,
+        rhat_threshold=config.rhat_threshold,
+        require_convergence=config.require_convergence,
+    )
+
     (xtrace,
     bctrace,
     rtrace,
@@ -194,12 +239,12 @@ def bristau_function(config: InversionParameters):
     kappa_x_trace_labels,
     tau_trace,
     tau_trace_labels,
-    ) = augmented_ffbs_mxkf_gibbs_double_slice(inversion_input)
-    
+    ) = gibbs_output
+
 
     end_haffbs = time.time()
 
-    print(f"Sampling Complete. Time taken = {end_haffbs-start_haffbs:.4f} seconds")
+    print(f"Sampling Complete. Time taken = {end_haffbs-start_haffbs:.4f} seconds.")
 
     start_post = time.time()
 
@@ -240,6 +285,7 @@ def bristau_function(config: InversionParameters):
                                           inner_group_id=inner_group_id,
                                           tau_trace=tau_trace,
                                           tau_trace_labels=tau_trace_labels,
+                                          convergence_report=convergence_report,
                                           )
 
 

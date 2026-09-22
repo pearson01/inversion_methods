@@ -1,6 +1,6 @@
 """
 System-level regression tests for
-inversion_methods.bristau.inversion_bristau.augmented_ffbs_mxkf_gibbs_double_slice,
+inversion_methods.bristau.inversion_bristau.augmented_ffbs_mxkf_gibbs_multi_slice,
 using small fully-synthetic InversionInput objects (no OpenGHG / real data
 store needed).
 
@@ -15,7 +15,7 @@ Gibbs loop, not just the unit-level `update_kappa_x` call):
    (`bristau_monthly_dictionaries`) sets `nbc=None`, and `int(None)` raises
    TypeError. Every use_bc=False inversion currently crashes.
 
-2. In `augmented_ffbs_mxkf_gibbs_double_slice`, the guard that decides
+2. In `augmented_ffbs_mxkf_gibbs_multi_slice`, the guard that decides
    whether `sigma2_rep_prior` needs parsing checks
    `sigma_qx_scheme != "fixed additive"` -- but `sigma_qx_scheme` can never
    equal that string (it belongs to sigma_rep's scheme vocabulary, not
@@ -40,7 +40,7 @@ import pytest
 
 from inversion_methods.bristau.inversion_bristau import (
     InversionInput,
-    augmented_ffbs_mxkf_gibbs_double_slice,
+    augmented_ffbs_mxkf_gibbs_multi_slice,
 )
 
 
@@ -91,7 +91,7 @@ def test_gibbs_sampler_learns_kappa_x_inner_outer_end_to_end():
         kappa_x="inner outer", nxout=2, nbc=0, sigma_qx=0.02,
         sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
-    outputs = augmented_ffbs_mxkf_gibbs_double_slice(config)
+    outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     kappa_x_trace = outputs[5]
 
     assert kappa_x_trace.shape[1] == 2
@@ -109,7 +109,7 @@ def test_gibbs_sampler_supports_use_bc_false():
         kappa_x=0.3, nxout=0, sigma_qx=0.02, nbc=None,
         sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
-    outputs = augmented_ffbs_mxkf_gibbs_double_slice(config)
+    outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     xtrace = outputs[0]
     assert np.all(np.isfinite(xtrace))
 
@@ -127,7 +127,7 @@ def test_gibbs_sampler_fixed_sigma_rep_does_not_require_sigma2_rep_prior():
         kappa_x=0.3, nxout=0, sigma_qx=0.02, nbc=0,
         sigma_rep=5.0, sigma2_rep_prior=None, sigma_rep_max=None,
     )
-    outputs = augmented_ffbs_mxkf_gibbs_double_slice(config)
+    outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     xtrace = outputs[0]
     assert np.all(np.isfinite(xtrace))
 
@@ -145,7 +145,7 @@ def test_gibbs_sampler_supports_outer_basis_functions_with_fixed_kappa():
         kappa_x=0.3, nxout=2, sigma_qx=0.02, nbc=0,
         sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
-    outputs = augmented_ffbs_mxkf_gibbs_double_slice(config)
+    outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     xtrace = outputs[0]
     assert xtrace.shape[2] == config.nbasis
     assert np.all(np.isfinite(xtrace))
@@ -164,7 +164,7 @@ def test_gibbs_sampler_supports_sigma_qx_inner_outer_with_fixed_kappa():
         kappa_x=0.3, nxout=2, sigma_qx="inner outer", nbc=0,
         sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
-    outputs = augmented_ffbs_mxkf_gibbs_double_slice(config)
+    outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     xtrace, sigma2_qx_trace = outputs[0], outputs[4]
     assert sigma2_qx_trace.shape[1] == 2
     assert np.all(np.isfinite(xtrace))
@@ -223,7 +223,7 @@ def test_gibbs_sampler_default_tau_resid_is_an_exact_noop():
     existing caller that doesn't opt in.
     """
     config = _make_inversion_input_with_timestamps(tau_resid=0.0, tau_resid_prior=None, tau_resid_max=None)
-    outputs = augmented_ffbs_mxkf_gibbs_double_slice(config)
+    outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     tau_trace, tau_trace_labels = outputs[8], outputs[9]
 
     assert tau_trace_labels == ["global"]
@@ -238,7 +238,7 @@ def test_gibbs_sampler_learns_tau_resid_global_end_to_end():
     still produce finite emissions/hyperparameter traces.
     """
     config = _make_inversion_input_with_timestamps(tau_resid="global")
-    outputs = augmented_ffbs_mxkf_gibbs_double_slice(config)
+    outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     tau_trace, tau_trace_labels = outputs[8], outputs[9]
 
     assert tau_trace_labels == ["global"]
@@ -246,3 +246,39 @@ def test_gibbs_sampler_learns_tau_resid_global_end_to_end():
     assert np.all((tau_trace > 0) & (tau_trace < config.tau_resid_max))
     assert len(np.unique(tau_trace)) > 1
     assert np.all(np.isfinite(outputs[0]))  # xtrace
+
+
+def test_gibbs_sampler_is_reproducible_when_given_an_explicit_rng():
+    """
+    Every random draw in the sampler -- each hyperparameter's slice sampler
+    and the backward-sampled emissions state -- must accept and use an
+    explicit numpy.random.Generator when one is passed in, rather than
+    silently falling back to global/unseeded randomness anywhere. This is
+    what lets a whole run (and, in multichain.py, a whole set of chains) be
+    reproduced exactly from a single seed.
+    """
+    # Builds on a combination already known to work (see
+    # test_gibbs_sampler_supports_sigma_qx_inner_outer_with_fixed_kappa
+    # above), with sigma_rep also switched to sampled ('global additive')
+    # so this test exercises two of the four slice samplers at once,
+    # without introducing an untested scheme combination of its own --
+    # this test is about reproducibility, not scheme coverage.
+    config = _make_inversion_input(
+        kappa_x=0.3, nxout=2, sigma_qx="inner outer", nbc=0,
+        sigma_rep="global additive",
+        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+    )
+
+    outputs_a = augmented_ffbs_mxkf_gibbs_multi_slice(config, rng=np.random.default_rng(2024))
+    outputs_b = augmented_ffbs_mxkf_gibbs_multi_slice(config, rng=np.random.default_rng(2024))
+
+    for array_a, array_b in zip(outputs_a, outputs_b):
+        if isinstance(array_a, np.ndarray):
+            np.testing.assert_array_equal(array_a, array_b)
+        else:
+            assert array_a == array_b
+
+    # A different seed should (overwhelmingly likely) produce a different
+    # trace -- otherwise the rng wouldn't actually be doing anything.
+    outputs_c = augmented_ffbs_mxkf_gibbs_multi_slice(config, rng=np.random.default_rng(999))
+    assert not np.array_equal(outputs_a[0], outputs_c[0])

@@ -523,8 +523,6 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
         err_var_inv = 1 / err_var
 
         if t == 0:
-            # za_mu[-1] = config.zprior_mus
-            # Pa[-1] = config.zprior_covariance
             zf_mu[t] = config.zprior_mus
             Pf[t] = np.diag(config.zprior_sigma2s)
         else:

@@ -147,9 +147,22 @@ def prior_parser(prior):
         raise ValueError(f"Your choice of prior is rather whack, check that ini file for {prior}")
 
 
-def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
+def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None):
     """
     Run the augmented FFBS/MXKF Gibbs sampler.
+
+    rng : numpy.random.Generator, optional
+        Source of randomness for every random draw this sampler makes (the
+        backward sampler and every hyperparameter slice sampler). Defaults
+        to None, which reproduces the exact behaviour this function has
+        always had: each hyperparameter draw falls back to plain
+        `numpy.random` (i.e. whatever the global random state happens to
+        be), and the backward sampler seeds its own, fresh, unseeded
+        generator on every call. Passing an explicit, seeded Generator
+        (e.g. `numpy.random.default_rng(seed)`) makes an entire run of this
+        function -- every iteration, every random draw -- fully
+        reproducible; see multichain.py, which does exactly this for each
+        chain it runs.
 
     Supported config.sigma_qx values
     --------------------------------
@@ -373,9 +386,9 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
     # ------------------------------------------------------------------
 
     for i in range(config.iterations):
-
-        print(
-            f"Iteration: {i}, sigma2_rep: {sigma2_rep_current}, sigma2_qx min/max: ({sigma2_qx_bf_current.min()}, {sigma2_qx_bf_current.max()}), kappa_x: ({kappa_x_vector_current}), tau_resid: {tau_current}", flush=True,)
+        if i % 50 == 0:
+            print(
+                f"Iteration: {i}, sigma2_rep: {sigma2_rep_current}, sigma2_qx min/max: ({sigma2_qx_bf_current.min()}, {sigma2_qx_bf_current.max()}), kappa_x: ({kappa_x_vector_current}), tau_resid: {tau_current}", flush=True,)
 
         # --------------------------------------------------------------
         # Construct initial-state prior variances
@@ -464,9 +477,10 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         # Backward sampling
         # --------------------------------------------------------------
 
-        (zmusample, zsample, state_residuals) = (augmented_backward_sampler(sampler_inputs))
+        (zmusample, zsample, state_residuals) = (augmented_backward_sampler(sampler_inputs, rng=rng))
 
-        print(f"z sample: median: {np.median(zsample)}, mean: {np.mean(zsample)}, std: {np.std(zsample)}", flush=True,)
+        if i % 50 == 0:
+            print(f"    z sample: median: {np.median(zsample)}, mean: {np.mean(zsample)}, std: {np.std(zsample)}", flush=True,)
 
         xtrace[i] = zsample[:, :config.nbasis,]
 
@@ -479,7 +493,7 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         # Update sigma2_rep
         # --------------------------------------------------------------
  
-        sigma2_rep_current = update_sigma2_rep(state_residuals, sigma_obs, sigma2_rep_aprior, sigma2_rep_bprior, sigma2_rep_max, sigma_rep_scheme, sigma2_rep_current, fixed_sigma2_rep)
+        sigma2_rep_current = update_sigma2_rep(state_residuals, sigma_obs, sigma2_rep_aprior, sigma2_rep_bprior, sigma2_rep_max, sigma_rep_scheme, sigma2_rep_current, fixed_sigma2_rep, rng=rng)
 
         var_rep_trace[i] = sigma2_rep_current
 
@@ -487,7 +501,7 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
         # Update tau (AR(1)/OU same-site residual-correlation length)
         # --------------------------------------------------------------
         
-        tau_current = update_tau_resid(state_residuals, sigma_obs, tau_aprior, tau_bprior, tau_max, tau_scheme, tau_current, fixed_tau, sigma2_rep_current, obs_prev_index_flat, obs_gap_flat)
+        tau_current = update_tau_resid(state_residuals, sigma_obs, tau_aprior, tau_bprior, tau_max, tau_scheme, tau_current, fixed_tau, sigma2_rep_current, obs_prev_index_flat, obs_gap_flat, rng=rng)
 
         tau_trace[i] = tau_current
 
@@ -523,7 +537,8 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
                              inner_group_id, 
                              ningroup,
                              kappa_x_vector_current,
-                             n_kappa_x_parameters,) 
+                             n_kappa_x_parameters,
+                             rng=rng,)
                              )
 
         # --------------------------------------------------------------
@@ -539,9 +554,10 @@ def augmented_ffbs_mxkf_gibbs_double_slice(config: InversionInput):
                                           nxout,
                                           nxin, 
                                           kappa_x_max, 
-                                          kappa_x_scheme, 
-                                          kappa_x_vector_current, 
-                                          fixed_kappa_x,)
+                                          kappa_x_scheme,
+                                          kappa_x_vector_current,
+                                          fixed_kappa_x,
+                                          rng=rng,)
 
         kappa_x_trace[i] = kappa_x_vector_current
 
@@ -607,6 +623,12 @@ class PostProcessInput:
     ningroup: int | None = None
     tau_trace: np.ndarray | None = None
     tau_trace_labels: list[str] | None = None
+    # Set only when the Gibbs sampler was run as several independent
+    # chains (see multichain.run_chains); None for an ordinary,
+    # single-chain run. When present, its contents are written into the
+    # output file's attributes below so the convergence evidence travels
+    # with the result rather than only appearing in a log.
+    convergence_report: dict | None = None
 
 
 def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
@@ -959,6 +981,26 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         
     outds.attrs["Start date"] = config.start_date
     outds.attrs["End date"] = config.end_date
+
+    # If this run used multiple chains (config.nchain > 1 in the ini file,
+    # see multichain.py), record the convergence check's results as plain
+    # attributes on the output file. This is deliberately simple (just
+    # numbers and strings, no new data variables/dimensions) so the
+    # evidence for whether the kept chain can be trusted travels with the
+    # result file itself, rather than only ever appearing in a log that is
+    # easy to lose track of.
+    if config.convergence_report is not None:
+        report = config.convergence_report
+        outds.attrs["nchain"] = report["nchain"]
+        outds.attrs["nchain_rhat_threshold"] = report["rhat_threshold"]
+        outds.attrs["nchain_worst_rhat"] = report["worst_rhat"]
+        # netCDF attributes can't hold Python booleans directly, so these
+        # are written out as the plain words "True"/"False".
+        outds.attrs["nchain_converged"] = str(report["converged"])
+        outds.attrs["nchain_any_parameter_checked"] = str(report["any_parameter_checked"])
+        for parameter_name, values in report["parameters"].items():
+            outds.attrs[f"nchain_rhat_{parameter_name}"] = values["rhat"]
+            outds.attrs[f"nchain_ess_{parameter_name}"] = values["ess"]
 
     # variables with variable length data types shouldn't be compressed
     # e.g. object ("O") or unicode ("U") type
