@@ -29,12 +29,14 @@ class amxkf_inputs:
     rprior: dict
     nxout: int
     nr: int
+    iteration: int
     kappa_r: float = 0.0
     nbc: int | None = None
     za_mu_warmstart: np.ndarray | None = None
     err_var_dic: dict | None = None
     Y_dic_raw: dict | None = None
     Hz_dic_raw: dict | None = None
+    verbose: bool = True
 
 
 @dataclass
@@ -536,7 +538,8 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
             converge_count += 1
                 
 
-    print(f"            {converge_count} convergences in {config.nperiod} MXKF time steps")
+    if config.verbose and config.iteration % 50 == 0:
+        print(f"            {converge_count} convergences in {config.nperiod} MXKF time steps")
 
     # The backward sampler computes residuals (Y_dic - Hz_dic @ z) purely as a
     # diagnostic fed to the sigma2_rep/sigma2_qx Gibbs updates. Those updates

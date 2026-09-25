@@ -117,11 +117,15 @@ def _run_one_chain(inversion_input, seed_sequence, keep_full_output):
         makes the same seed reproduce the same chain again later.
     keep_full_output : bool
         True for exactly one chain (the "keeper", see run_chains()). That
-        chain returns its full set of traces. Every other chain only needs
-        to feed into the convergence check, so it summarises its own
-        output (see _summarise_chain_output above) and throws the large
-        traces away *before* sending anything back to the main process --
-        this keeps the amount of data copied between processes small.
+        chain returns its full set of traces, and is also the only chain
+        allowed to print its usual progress output (see the `verbose`
+        argument of augmented_ffbs_mxkf_gibbs_multi_slice) -- otherwise,
+        running nchain chains at once would interleave nchain copies of
+        the same progress lines. Every other chain only needs to feed into
+        the convergence check, so it summarises its own output (see
+        _summarise_chain_output above) and throws the large traces away
+        *before* sending anything back to the main process -- this keeps
+        the amount of data copied between processes small.
 
     Returns
     -------
@@ -139,7 +143,9 @@ def _run_one_chain(inversion_input, seed_sequence, keep_full_output):
     # its own if you rerun it with the same seed later.
     rng = np.random.default_rng(seed_sequence)
 
-    gibbs_output = augmented_ffbs_mxkf_gibbs_multi_slice(inversion_input, rng=rng)
+    # Only the keeper chain prints -- see the keep_full_output docstring
+    # above.
+    gibbs_output = augmented_ffbs_mxkf_gibbs_multi_slice(inversion_input, rng=rng, verbose=keep_full_output)
 
     if keep_full_output:
         return gibbs_output

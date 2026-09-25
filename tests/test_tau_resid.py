@@ -63,8 +63,8 @@ def _two_site_example():
 def test_prepare_tau_resid_indexing_finds_correct_same_site_predecessor_across_periods():
     Y_dic, Hz_dic, sigma_obs_dic, Ytime_dic, siteindicator_dic = _two_site_example()
 
-    prev_Y_dic, prev_H_dic, gap_dic, has_prev_dic, gap_flat, prev_index_flat = prepare_tau_resid_indexing(
-        Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, nperiod=2,
+    prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, gap_flat, prev_index_flat = prepare_tau_resid_indexing(
+        Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigma_obs_dic, nperiod=2,
     )
 
     # Each site's first-ever observation has no predecessor.
@@ -76,6 +76,7 @@ def test_prepare_tau_resid_indexing_finds_correct_same_site_predecessor_across_p
     np.testing.assert_array_equal(has_prev_dic[1], [True, True])
     np.testing.assert_allclose(gap_dic[1], [7.0, 25.0])
     np.testing.assert_allclose(prev_Y_dic[1], [2.0, 3.0])
+    np.testing.assert_allclose(prev_sigma_obs_dic[1], [0.1, 0.1])
 
     # Flat indices (order: p0r0, p0r1, p0r2, p1r0, p1r1).
     np.testing.assert_array_equal(prev_index_flat, [-1, -1, 0, 1, 2])
@@ -84,12 +85,12 @@ def test_prepare_tau_resid_indexing_finds_correct_same_site_predecessor_across_p
 
 def test_whiten_observations_is_exact_noop_when_tau_is_zero():
     Y_dic, Hz_dic, sigma_obs_dic, Ytime_dic, siteindicator_dic = _two_site_example()
-    prev_Y_dic, prev_H_dic, gap_dic, has_prev_dic, _, _ = prepare_tau_resid_indexing(
-        Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, nperiod=2,
+    prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, _, _ = prepare_tau_resid_indexing(
+        Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigma_obs_dic, nperiod=2,
     )
 
     Y_out, Hz_out, err_var_out = whiten_observations(
-        Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, gap_dic, has_prev_dic,
+        Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic,
         sigma2_rep=2.0, tau=0.0, nperiod=2,
     )
 
@@ -100,14 +101,18 @@ def test_whiten_observations_is_exact_noop_when_tau_is_zero():
 
 
 def test_whiten_observations_matches_manual_gls_formula():
+    # sigma_obs is uniform across observations here, so the err_var ratio
+    # correction is 1.0 everywhere and this reduces to the simple phi form --
+    # see test_whiten_observations_applies_variance_ratio_when_sigma_obs_differs
+    # for the case where that ratio actually matters.
     Y_dic, Hz_dic, sigma_obs_dic, Ytime_dic, siteindicator_dic = _two_site_example()
-    prev_Y_dic, prev_H_dic, gap_dic, has_prev_dic, _, _ = prepare_tau_resid_indexing(
-        Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, nperiod=2,
+    prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, _, _ = prepare_tau_resid_indexing(
+        Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigma_obs_dic, nperiod=2,
     )
 
     tau, sigma2_rep = 4.0, 0.0
     Y_out, Hz_out, err_var_out = whiten_observations(
-        Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, gap_dic, has_prev_dic,
+        Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic,
         sigma2_rep=sigma2_rep, tau=tau, nperiod=2,
     )
 
@@ -124,6 +129,47 @@ def test_whiten_observations_matches_manual_gls_formula():
     # Rows with no predecessor are untouched.
     assert Y_out[0][0] == pytest.approx(Y_dic[0][0])
     assert err_var_out[0][0] == pytest.approx(sigma2_rep + sigma_obs_dic[0][0] ** 2)
+
+
+def test_whiten_observations_applies_variance_ratio_when_sigma_obs_differs():
+    """
+    When sigma_obs differs between an observation and its same-site
+    predecessor, the mean term must be scaled by sqrt(err_var_i /
+    err_var_prev), not just by phi -- otherwise E[r_i | r_prev] is wrong for
+    jointly Gaussian residuals with correlation phi and unequal marginal
+    variances. The variance term (err_var_i * (1 - phi**2)) does not need
+    this correction; it's already exact in terms of err_var_i alone.
+    """
+    Y_dic = {0: np.array([1.0, 4.0])}
+    Hz_dic = {0: np.array([[1.0, 0.0], [2.0, 0.0]])}
+    # Same site, unequal sigma_obs: predecessor has sigma_obs=0.1, second row has sigma_obs=0.5.
+    sigma_obs_dic = {0: np.array([0.1, 0.5])}
+    Ytime_dic = {0: np.array([0, 3], dtype="datetime64[h]")}
+    siteindicator_dic = {0: np.array([0, 0])}
+
+    prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, _, _ = prepare_tau_resid_indexing(
+        Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigma_obs_dic, nperiod=1,
+    )
+
+    tau, sigma2_rep = 5.0, 1.0
+    Y_out, Hz_out, err_var_out = whiten_observations(
+        Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic,
+        sigma2_rep=sigma2_rep, tau=tau, nperiod=1,
+    )
+
+    phi = np.exp(-3.0 / tau)
+    err_var_1 = sigma2_rep + 0.5**2
+    err_var_0 = sigma2_rep + 0.1**2
+    ratio = np.sqrt(err_var_1 / err_var_0)
+    phi_mean = phi * ratio
+
+    expected_Y = 4.0 - phi_mean * 1.0
+    expected_H = np.array([2.0, 0.0]) - phi_mean * np.array([1.0, 0.0])
+    expected_err_var = err_var_1 * (1 - phi**2)  # variance term uses raw phi, not phi_mean
+
+    assert Y_out[0][1] == pytest.approx(expected_Y)
+    np.testing.assert_allclose(Hz_out[0][1], expected_H)
+    assert err_var_out[0][1] == pytest.approx(expected_err_var)
 
 
 def test_sample_tau_recovers_strong_correlation():

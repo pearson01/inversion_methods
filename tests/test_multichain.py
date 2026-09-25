@@ -127,6 +127,23 @@ def test_run_one_chain_with_different_seeds_gives_different_draws():
     assert not np.array_equal(xtrace_a, xtrace_b)
 
 
+def test_run_one_chain_only_prints_for_the_keeper_chain(capsys):
+    """
+    Progress output (the periodic 'Iteration: ...'/'z sample: ...' lines
+    and the MXKF convergence-count line) must only appear for the chain
+    being kept -- otherwise running nchain chains at once would interleave
+    nchain copies of the same progress output.
+    """
+    config = _make_small_inversion_input(iterations=5)
+    seed = np.random.SeedSequence(3).spawn(1)[0]
+
+    _run_one_chain(config, seed, keep_full_output=False)
+    assert "Iteration:" not in capsys.readouterr().out
+
+    _run_one_chain(config, seed, keep_full_output=True)
+    assert "Iteration:" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------
 # Summary/stacking helpers, tested directly (no need for real subprocesses)
 # ---------------------------------------------------------------------

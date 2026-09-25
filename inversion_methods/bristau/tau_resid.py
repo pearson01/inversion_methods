@@ -12,12 +12,16 @@ This module adds an optional, temporally-invariant correlation-length
 hyperparameter `tau` (in hours), modelling same-site residual correlation as
 phi(gap) = exp(-gap / tau) (a continuous-time AR(1)/Ornstein-Uhlenbeck
 process). Because an AR(1)/OU process has a tridiagonal precision matrix,
-removing the correlation is a cheap, one-shot, vectorised GLS whitening
+removing the correlation is a cheap, one-shot, vectorised GLS decorrelation
 transform applied directly to the fixed (Y, Hz) data -- it never touches the
 evolving state, so it can be recomputed once per Gibbs iteration (after
 `tau` and `sigma2_rep` are resampled) with no changes needed to the
 Kalman-gain/Woodbury machinery in `bristau_filter_sampler.py` or
-`matrix_identities.py`.
+`matrix_identities.py`. The transform only removes correlation
+(whiten_observations()'s own output covariance is diag(err_var), not I);
+the accompanying variance normalisation that completes the whitening is
+applied implicitly downstream, via err_var_inv, by the existing diagonal-R
+Kalman-gain machinery.
 
 `tau_resid = 0.0` (the default) disables this entirely: phi is 0
 everywhere, whiten_observations() returns Y/Hz unchanged and err_var exactly
@@ -78,13 +82,13 @@ def _gap_hours(t_new, t_old):
     return float(t_new - t_old)
 
 
-def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, nperiod):
+def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigma_obs_dic, nperiod):
     """
     One-time precomputation of same-site temporal adjacency.
 
-    This depends only on the fixed, raw Y/Hz/Ytime/siteindicator data, not on
-    any Gibbs-sampled hyperparameter, so it only needs to be computed once
-    per inversion run rather than once per iteration.
+    This depends only on the fixed, raw Y/Hz/Ytime/siteindicator/sigma_obs
+    data, not on any Gibbs-sampled hyperparameter, so it only needs to be
+    computed once per inversion run rather than once per iteration.
 
     Returns
     -------
@@ -93,6 +97,9 @@ def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, nper
         observation (which may sit in an earlier period). Zero where no
         preceding observation exists (that observation is the first of its
         site in the whole run).
+    prev_sigma_obs_dic : dict[int, np.ndarray]
+        Per period: sigma_obs of that preceding same-site observation. Zero
+        where no preceding observation exists.
     gap_dic : dict[int, np.ndarray]
         Per period: the time gap in hours to that preceding observation.
     has_prev_dic : dict[int, np.ndarray of bool]
@@ -105,10 +112,10 @@ def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, nper
         For each observation (same flat order as above), the flat index of
         its preceding same-site observation, or -1 if none.
     """
-    prev_Y_dic, prev_H_dic, gap_dic, has_prev_dic = {}, {}, {}, {}
+    prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic = {}, {}, {}, {}, {}
     gap_flat_parts, prev_index_flat_parts = [], []
 
-    last_time, last_Y, last_H, last_flat_index = {}, {}, {}, {}
+    last_time, last_Y, last_H, last_sigma_obs, last_flat_index = {}, {}, {}, {}, {}
     flat_offset = 0
 
     for t in range(nperiod):
@@ -116,10 +123,12 @@ def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, nper
         H = Hz_dic[t]
         times = Ytime_dic[t]
         sites = siteindicator_dic[t]
+        sigma_obs = sigma_obs_dic[t]
         n = len(Y)
 
         prev_Y = np.zeros(n, dtype=float)
         prev_H = np.zeros_like(H, dtype=float)
+        prev_sigma_obs = np.zeros(n, dtype=float)
         gap = np.zeros(n, dtype=float)
         has_prev = np.zeros(n, dtype=bool)
         prev_index = np.full(n, -1, dtype=int)
@@ -135,6 +144,7 @@ def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, nper
             if site in last_time:
                 prev_Y[idx] = last_Y[site]
                 prev_H[idx] = last_H[site]
+                prev_sigma_obs[idx] = last_sigma_obs[site]
                 gap[idx] = _gap_hours(times[idx], last_time[site])
                 has_prev[idx] = True
                 prev_index[idx] = last_flat_index[site]
@@ -142,10 +152,12 @@ def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, nper
             last_time[site] = times[idx]
             last_Y[site] = Y[idx]
             last_H[site] = H[idx]
+            last_sigma_obs[site] = sigma_obs[idx]
             last_flat_index[site] = flat_offset + idx
 
         prev_Y_dic[t] = prev_Y
         prev_H_dic[t] = prev_H
+        prev_sigma_obs_dic[t] = prev_sigma_obs
         gap_dic[t] = gap
         has_prev_dic[t] = has_prev
         gap_flat_parts.append(gap)
@@ -155,10 +167,10 @@ def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, nper
     gap_flat = np.concatenate(gap_flat_parts)
     prev_index_flat = np.concatenate(prev_index_flat_parts)
 
-    return prev_Y_dic, prev_H_dic, gap_dic, has_prev_dic, gap_flat, prev_index_flat
+    return prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, gap_flat, prev_index_flat
 
 
-def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, gap_dic, has_prev_dic, sigma2_rep, tau, nperiod):
+def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, sigma2_rep, tau, nperiod):
     """
     One-shot GLS whitening transform for the AR(1)/OU residual-correlation
     model, phi(gap) = exp(-gap / tau).
@@ -168,6 +180,22 @@ def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, ga
     is cheap to recompute every Gibbs iteration as new tau/sigma2_rep values
     are drawn, and its output (Y, Hz, err_var) can be fed directly into the
     existing, unmodified diagonal-R Kalman-gain machinery.
+
+    phi is the *correlation* between an observation's residual and its
+    preceding same-site residual, not a raw AR coefficient, so the two need
+    not share the same marginal variance (err_var = sigma2_rep +
+    sigma_obs**2 can differ between them if sigma_obs does). For jointly
+    Gaussian residuals with correlation phi and marginal variances
+    err_var_i, err_var_prev:
+
+        E[r_i | r_prev]   = phi * sqrt(err_var_i / err_var_prev) * r_prev
+        Var(r_i | r_prev) = err_var_i * (1 - phi**2)
+
+    so the ratio sqrt(err_var_i / err_var_prev) is applied when subtracting
+    off the predecessor's contribution to Y/Hz; it doesn't enter the
+    variance term, which is already exact in terms of err_var_i alone. The
+    ratio reduces to 1 (recovering the earlier, simpler form) whenever
+    sigma_obs is constant across a same-site pair.
 
     tau <= 0 (including the disabled default) returns Y_dic/Hz_dic unchanged
     and err_var computed exactly as before this module existed.
@@ -187,8 +215,12 @@ def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, ga
         has_prev = has_prev_dic[t]
         phi = np.where(has_prev, np.exp(-gap_dic[t] / tau), 0.0)
 
-        Y_out[t] = Y_dic[t] - phi * prev_Y_dic[t]
-        Hz_out[t] = Hz_dic[t] - phi[:, None] * prev_H_dic[t]
+        err_var_prev = sigma2_rep + prev_sigma_obs_dic[t]**2
+        ratio = np.where(has_prev, np.sqrt(err_var / np.maximum(err_var_prev, 1e-12)), 1.0)
+        phi_mean = phi * ratio
+
+        Y_out[t] = Y_dic[t] - phi_mean * prev_Y_dic[t]
+        Hz_out[t] = Hz_dic[t] - phi_mean[:, None] * prev_H_dic[t]
         err_var_out[t] = np.where(has_prev, err_var * (1.0 - phi**2), err_var)
 
     return Y_out, Hz_out, err_var_out

@@ -147,7 +147,7 @@ def prior_parser(prior):
         raise ValueError(f"Your choice of prior is rather whack, check that ini file for {prior}")
 
 
-def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None):
+def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verbose=True):
     """
     Run the augmented FFBS/MXKF Gibbs sampler.
 
@@ -163,6 +163,14 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None):
         function -- every iteration, every random draw -- fully
         reproducible; see multichain.py, which does exactly this for each
         chain it runs.
+
+    verbose : bool, optional
+        When True (the default), prints the usual per-50-iteration
+        progress lines (current hyperparameter values, backward-sampled
+        state summary) and the per-iteration MXKF convergence-count line.
+        Set to False to run silently -- multichain.py does this for every
+        chain except the one it keeps, so running several chains at once
+        doesn't interleave nchain copies of the same progress output.
 
     Supported config.sigma_qx values
     --------------------------------
@@ -260,9 +268,9 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None):
     # a no-op and reproduces the previous behaviour exactly.
     # ------------------------------------------------------------------
 
-    (obs_prev_Y_dic, obs_prev_H_dic, obs_gap_dic, obs_has_prev_dic,
+    (obs_prev_Y_dic, obs_prev_H_dic, obs_prev_sigma_obs_dic, obs_gap_dic, obs_has_prev_dic,
      obs_gap_flat, obs_prev_index_flat) = prepare_tau_resid_indexing(
-        config.Y_dic, config.Hz_dic, config.Ytime_dic, config.siteindicator_dic, config.nperiod,
+        config.Y_dic, config.Hz_dic, config.Ytime_dic, config.siteindicator_dic, config.sigma_obs_dic, config.nperiod,
     )
 
     if tau_scheme != "fixed":
@@ -386,7 +394,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None):
     # ------------------------------------------------------------------
 
     for i in range(config.iterations):
-        if i % 50 == 0:
+        if verbose and i % 50 == 0:
             print(
                 f"Iteration: {i}, sigma2_rep: {sigma2_rep_current}, sigma2_qx min/max: ({sigma2_qx_bf_current.min()}, {sigma2_qx_bf_current.max()}), kappa_x: ({kappa_x_vector_current}), tau_resid: {tau_current}", flush=True,)
 
@@ -440,7 +448,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None):
         # is 0, i.e. whenever this feature isn't in use.
         Y_dic_whitened, Hz_dic_whitened, err_var_dic = whiten_observations(
             config.Y_dic, config.Hz_dic, config.sigma_obs_dic,
-            obs_prev_Y_dic, obs_prev_H_dic, obs_gap_dic, obs_has_prev_dic,
+            obs_prev_Y_dic, obs_prev_H_dic, obs_prev_sigma_obs_dic, obs_gap_dic, obs_has_prev_dic,
             sigma2_rep_current, tau_current, config.nperiod,
         )
 
@@ -463,10 +471,12 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None):
             nbc=config.nbc,
             nr=config.nr,
             nxout=nxout,
+            iteration=i,
             za_mu_warmstart=za_mu_prev,
             err_var_dic=err_var_dic,
             Y_dic_raw=config.Y_dic,
             Hz_dic_raw=config.Hz_dic,
+            verbose=verbose,
         )
 
         sampler_inputs = iterative_augmented_mxkf(filter_inputs)
@@ -479,8 +489,8 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None):
 
         (zmusample, zsample, state_residuals) = (augmented_backward_sampler(sampler_inputs, rng=rng))
 
-        if i % 50 == 0:
-            print(f"    z sample: median: {np.median(zsample)}, mean: {np.mean(zsample)}, std: {np.std(zsample)}", flush=True,)
+        if verbose and i % 50 == 0:
+            print(f"        z sample: median: {np.median(zsample)}, mean: {np.mean(zsample)}, std: {np.std(zsample)}", flush=True,)
 
         xtrace[i] = zsample[:, :config.nbasis,]
 
