@@ -234,3 +234,36 @@ def test_update_tau_resid_fixed_scheme_never_calls_sampler():
         obs_prev_index_flat=np.array([-1, 0]), obs_gap_flat=np.array([0.0, 1.0]),
     )
     assert result == pytest.approx(0.0)
+
+
+def test_whiten_observations_flushes_negligible_correlations_to_zero():
+    """
+    Once gap / tau exceeds ~708, exp(-gap / tau) underflows to subnormal
+    floats, which would otherwise leak into Hz_out wherever Hz is zero and
+    make later BLAS calls on it very slow. Correlations that small have no
+    representable effect, so they must come out as exact zeros, giving the
+    same result as an uncorrelated predecessor.
+    """
+    Y_dic, Hz_dic, sigma_obs_dic, Ytime_dic, siteindicator_dic = _two_site_example()
+    # Site A @ 5h follows site A @ 0h (Hz row [1, 0]). Zeroing its first
+    # column is what lets a subnormal phi show up in Hz_out: 0 - phi * 1.
+    Hz_dic[0] = np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 1.0]])
+    prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, _, _ = prepare_tau_resid_indexing(
+        Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigma_obs_dic, nperiod=2,
+    )
+    # Smallest same-site gap here is 5h, so this tau puts every gap / tau
+    # at or above 720, i.e. into (or past) the subnormal range of exp().
+    tau = 5.0 / 720.0
+
+    Y_out, Hz_out, err_var_out = whiten_observations(
+        Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic,
+        sigma2_rep=2.0, tau=tau, nperiod=2,
+    )
+
+    tiny = np.finfo(float).tiny
+    for t in range(2):
+        assert not np.any((Hz_out[t] != 0) & (np.abs(Hz_out[t]) < tiny))
+        assert not np.any((Y_out[t] != 0) & (np.abs(Y_out[t]) < tiny))
+        np.testing.assert_array_equal(Y_out[t], Y_dic[t])
+        np.testing.assert_array_equal(Hz_out[t], Hz_dic[t])
+        np.testing.assert_array_equal(err_var_out[t], 2.0 + sigma_obs_dic[t] ** 2)

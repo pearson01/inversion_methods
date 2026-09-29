@@ -215,6 +215,14 @@ def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, pr
         has_prev = has_prev_dic[t]
         phi = np.where(has_prev, np.exp(-gap_dic[t] / tau), 0.0)
 
+        # Correlations below machine epsilon have no representable effect
+        # (1 - phi**2 already rounds to 1 for phi < ~1e-8). Left in, exp()
+        # underflows to subnormal values once gap / tau > ~708, and those
+        # propagate into Hz_out wherever Hz is zero, making every later BLAS
+        # call on Hz_out (the per-period Gram matrix in particular) ~100x
+        # slower.
+        phi[phi < np.finfo(float).eps] = 0.0
+
         err_var_prev = sigma2_rep + prev_sigma_obs_dic[t]**2
         ratio = np.where(has_prev, np.sqrt(err_var / np.maximum(err_var_prev, 1e-12)), 1.0)
         phi_mean = phi * ratio

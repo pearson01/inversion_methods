@@ -35,6 +35,8 @@ Each bug test below currently fails (documenting the bug); fixing the
 underlying code should turn it green.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -282,3 +284,32 @@ def test_gibbs_sampler_is_reproducible_when_given_an_explicit_rng():
     # trace -- otherwise the rng wouldn't actually be doing anything.
     outputs_c = augmented_ffbs_mxkf_gibbs_multi_slice(config, rng=np.random.default_rng(999))
     assert not np.array_equal(outputs_a[0], outputs_c[0])
+
+
+def test_gibbs_sampler_analysis_forms_agree_end_to_end():
+    """
+    analysis_form only changes how the (algebraically identical) Kalman gain
+    and analysis covariance are computed, so with the same seed both forms
+    must produce the same chain up to floating-point rounding.
+    """
+    config = _make_inversion_input(
+        kappa_x="inner outer", nxout=2, nbc=0, sigma_qx=0.02,
+        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+    )
+    config_woodbury = dataclasses.replace(config, analysis_form="woodbury")
+
+    outputs_info = augmented_ffbs_mxkf_gibbs_multi_slice(config, rng=np.random.default_rng(7))
+    outputs_wood = augmented_ffbs_mxkf_gibbs_multi_slice(config_woodbury, rng=np.random.default_rng(7))
+
+    for array_info, array_wood in zip(outputs_info, outputs_wood):
+        if isinstance(array_info, np.ndarray):
+            np.testing.assert_allclose(array_info, array_wood, rtol=1e-8, atol=1e-10)
+        else:
+            assert array_info == array_wood
+
+
+@pytest.mark.parametrize("value", ["kalman", 1])
+def test_gibbs_sampler_rejects_invalid_analysis_form(value):
+    config = dataclasses.replace(_make_inversion_input(), analysis_form=value)
+    with pytest.raises((ValueError, TypeError), match="analysis_form"):
+        augmented_ffbs_mxkf_gibbs_multi_slice(config)

@@ -67,6 +67,7 @@ class InversionInput:
     tau_resid: str | float | None = 0.0
     tau_resid_prior: dict | None = None
     tau_resid_max: float | None = 200
+    analysis_form: str = "information"
 
 
 def bristau_monthly_dictionaries(config: MessyInput) -> InversionInput:
@@ -145,6 +146,24 @@ def prior_parser(prior):
     else:
 
         raise ValueError(f"Your choice of prior is rather whack, check that ini file for {prior}")
+
+
+def analysis_form_select(config):
+    """
+    Normalise and validate config.analysis_form, the choice of Kalman gain /
+    analysis covariance calculation used by iterative_analysis_update.
+    """
+    if not isinstance(config.analysis_form, str):
+        raise TypeError("config.analysis_form must be 'information' or 'woodbury'.")
+
+    analysis_form = " ".join(config.analysis_form.lower().split())
+
+    valid_forms = {"information", "woodbury"}
+
+    if analysis_form not in valid_forms:
+        raise ValueError(f"Unknown config.analysis_form value: {config.analysis_form!r}. Expected one of {sorted(valid_forms)}.")
+
+    return analysis_form
 
 
 def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verbose=True):
@@ -255,6 +274,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
     sigma_qx_scheme, fixed_sigma2_qx, ningroup, inner_group_id = sigma_qx_scheme_select(config, nxin)
     kappa_x_scheme, fixed_kappa_x = kappa_x_scheme_select(config)
     tau_scheme, fixed_tau = tau_scheme_select(config)
+    analysis_form = analysis_form_select(config)
 
     sigma_obs = np.concatenate([config.sigma_obs_dic[t] for t in range(config.nperiod)])
 
@@ -477,6 +497,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
             Y_dic_raw=config.Y_dic,
             Hz_dic_raw=config.Hz_dic,
             verbose=verbose,
+            analysis_form=analysis_form,
         )
 
         sampler_inputs = iterative_augmented_mxkf(filter_inputs)

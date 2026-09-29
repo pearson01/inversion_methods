@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.linalg import cholesky, solve_triangular, cho_factor, cho_solve
+from scipy.linalg.lapack import dpotri
 
 
 def woodbury(inv_A, U, C, V):
@@ -490,6 +491,120 @@ def covariance_from_woodbury_factor(L, S_factor):
 
     Pa = L @ Sinv_LT
     Pa = 0.5 * (Pa + Pa.T)
+
+    return Pa
+
+
+def precision_from_cholesky(L):
+    """
+    Return Pf^{-1} given the lower Cholesky factor L of Pf.
+
+    Computed once per filter time step and reused across every
+    Gauss-Newton relinearisation at that step, since Pf does not change
+    within the inner loop.
+    """
+    nz = L.shape[0]
+
+    Pf_inv = cho_solve((L, True), np.eye(nz), overwrite_b=True, check_finite=False)
+
+    return _symmetrize_square(Pf_inv)
+
+
+def kalman_gain_information_from_gram(
+    Pf_inv,
+    G,
+    wb,
+    h,
+):
+    """
+    Compute the Kalman gain applied to a vector, K @ d, in information
+    form, given the same state-space Gram reduction used by
+    kalman_gain_woodbury_from_gram.
+
+    This is algebraically identical to the Woodbury form. With
+    S = I + L.T @ diag(wb) @ G @ diag(wb) @ L and Pf = L @ L.T:
+
+        L @ S^{-1} @ L.T = (Pf^{-1} + diag(wb) @ G @ diag(wb))^{-1} = Pa
+
+    so
+
+        K @ d = Pa @ H_hat.T @ diag(R_inv) @ d = Pa @ (wb * h)
+
+    The Woodbury form needs two dense (nz, nz) products and a Cholesky
+    factorisation per call. Given Pf^{-1} (see precision_from_cholesky),
+    the information form needs only an O(nz**2) update and one Cholesky
+    factorisation per call.
+
+    It relies on Pf being reasonably well conditioned. The forecast
+    noise Q is added to every diagonal element of Pf, so the smallest
+    eigenvalue of Pf is bounded below by min(Q).
+
+    Parameters
+    ----------
+    Pf_inv : ndarray, shape (nz, nz)
+        Inverse of the forecast-error covariance ``Pf``.
+
+    G : ndarray, shape (nz, nz)
+        ``H.T @ diag(R_inv) @ H``, not yet weighted by ``wb``.
+
+    wb : ndarray, shape (nz,)
+        Diagonal entries of the state-dependent Jacobian relating
+        ``H_hat`` to ``H``, i.e. ``H_hat = H @ diag(wb)``.
+
+    h : ndarray, shape (nz,)
+        ``H.T @ diag(R_inv) @ d``, not yet weighted by ``wb``.
+
+    Returns
+    -------
+    Kd : ndarray, shape (nz,)
+        The Kalman gain applied to ``d``, i.e. ``K @ d``.
+
+    A_factor : tuple of (ndarray, bool)
+        Cholesky factorisation of the posterior precision matrix
+        ``Pa^{-1} = Pf^{-1} + diag(wb) @ G @ diag(wb)``.
+    """
+
+    Pf_inv = np.asarray(Pf_inv)
+    G = np.asarray(G)
+    wb = np.asarray(wb)
+    h = np.asarray(h)
+
+    # Posterior precision. Pf_inv and G are both symmetric, so this is
+    # symmetric up to rounding.
+    A = Pf_inv + (wb[:, None] * G) * wb[None, :]
+    A = _symmetrize_square(A)
+
+    try:
+        A_factor = cho_factor(A, lower=True, overwrite_a=True, check_finite=False)
+
+    except np.linalg.LinAlgError:
+        A_L, _, _ = _cholesky_with_repair(A)
+        A_factor = (A_L, True)
+
+    Kd = cho_solve(A_factor, wb * h, overwrite_b=False, check_finite=False)
+
+    return Kd, A_factor
+
+
+def covariance_from_information_factor(A_factor):
+    """
+    Return Pa = A^{-1} given the Cholesky factorisation of the posterior
+    precision A (as returned by kalman_gain_information_from_gram).
+    """
+    A_L, lower = A_factor
+
+    # dpotri only reads the triangle named by ``lower``, so any values
+    # cho_factor left in the other triangle are ignored.
+    Pa_tri, info = dpotri(A_L, lower=int(lower))
+
+    if info != 0:
+        nz = A_L.shape[0]
+        return _symmetrize_square(cho_solve(A_factor, np.eye(nz), check_finite=False))
+
+    if lower:
+        Pa = np.tril(Pa_tri) + np.tril(Pa_tri, -1).T
+    else:
+        Pa = np.triu(Pa_tri) + np.triu(Pa_tri, 1).T
 
     return Pa
 

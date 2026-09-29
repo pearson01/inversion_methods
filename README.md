@@ -99,13 +99,21 @@ through each monthly `Hz_dic`/`Y_dic` pair and computes the analysis update. Bec
 log-normal state transformation makes the observation operator nonlinear in the untransformed
 state, `iterative_analysis_update` performs an inner Gauss-Newton loop (with optional Anderson
 acceleration and backtracking, `max_inner_iters=5`, `tol=1e-2`) to relinearise around the current
-analysis estimate until it is consistent with the forecast to within tolerance. The Kalman gain
-and analysis covariance are computed with a Woodbury-identity formulation
-(`kalman_gain_woodbury_from_cholesky`, `covariance_from_woodbury_factor` in
-[matrix_identities.py](inversion_methods/manipulation/matrix_identities.py)) that factorises an
-`nz x nz` system (`nz` being the augmented state dimension) instead of the `ny x ny` innovation
-covariance, so that the update cost scales with the (small) state dimension rather than the
-(larger) number of observations per month, which is typically much greater than `nz`.
+analysis estimate until it is consistent with the forecast to within tolerance. The observation
+operator is first reduced to a per-month `nz x nz` Gram matrix `G = H.T R^-1 H` (`nz` being the
+augmented state dimension), so that the update cost scales with the (small) state dimension rather
+than the (larger) number of observations per month, which is typically much greater than `nz`.
+The Kalman gain and analysis covariance are then computed in one of two algebraically identical
+forms, chosen with `analysis_form` in the ini file:
+
+- `"information"` (default): factorises the posterior precision `Pf^-1 + W G W` directly
+  (`kalman_gain_information_from_gram`, `covariance_from_information_factor`). Usually the faster
+  choice, particularly with few BLAS threads per chain.
+- `"woodbury"`: factorises the Woodbury system `I + L.T W G W L`, with `Pf = L L.T`
+  (`kalman_gain_woodbury_from_gram`, `covariance_from_woodbury_factor`). The more robust fallback
+  if the forecast covariance becomes badly conditioned.
+
+Both live in [matrix_identities.py](inversion_methods/manipulation/matrix_identities.py).
 
 **Backward sampling.** `augmented_backward_sampler` performs the "BS" half of FFBS: it draws one
 full posterior trajectory of `z_t` for every month, conditioned on all months of data, by sampling

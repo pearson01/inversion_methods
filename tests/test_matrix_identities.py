@@ -19,6 +19,9 @@ from inversion_methods.manipulation.matrix_identities import (
     kalman_gain_woodbury,
     kalman_gain_woodbury_from_gram,
     covariance_from_woodbury_factor,
+    precision_from_cholesky,
+    kalman_gain_information_from_gram,
+    covariance_from_information_factor,
     _cholesky_with_repair,
     _sample_gaussian_cholesky,
     _symmetrize_square,
@@ -126,6 +129,58 @@ def test_kalman_gain_woodbury_from_gram_handles_nontrivial_jacobian_weight():
     H_hat = H * wb[None, :]  # H_hat = H @ diag(wb)
     K_naive = _naive_kalman_gain(Pf, H_hat, r_diag)
     np.testing.assert_allclose(Kd_fast, K_naive @ d, rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.parametrize("seed", [21, 22, 23])
+def test_information_form_matches_woodbury_form(seed):
+    """
+    kalman_gain_information_from_gram computes the same K @ d and Pa as
+    kalman_gain_woodbury_from_gram, via Pa = (Pf^-1 + diag(wb) G diag(wb))^-1
+    rather than the Woodbury system S = I + L.T diag(wb) G diag(wb) L.
+    """
+    nz, ny = 12, 40
+    rng = np.random.default_rng(seed)
+    Pf = _random_spd(nz, seed=seed)
+    H = rng.normal(size=(ny, nz))
+    r_inv = 1.0 / rng.uniform(0.5, 2.0, size=ny)
+    wb = rng.uniform(0.3, 2.5, size=nz)
+    d = rng.normal(size=ny)
+
+    L = cholesky(Pf, lower=True)
+    G = H.T @ (r_inv[:, None] * H)
+    h = H.T @ (r_inv * d)
+
+    Kd_wood, S_factor = kalman_gain_woodbury_from_gram(L, G, wb, h)
+    Pa_wood = covariance_from_woodbury_factor(L, S_factor)
+
+    Kd_info, A_factor = kalman_gain_information_from_gram(precision_from_cholesky(L), G, wb, h)
+    Pa_info = covariance_from_information_factor(A_factor)
+
+    np.testing.assert_allclose(Kd_info, Kd_wood, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(Pa_info, Pa_wood, rtol=1e-10, atol=1e-12)
+    np.testing.assert_array_equal(Pa_info, Pa_info.T)
+
+
+def test_information_form_matches_naive_kalman_filter():
+    nz, ny = 5, 20
+    rng = np.random.default_rng(31)
+    Pf = _random_spd(nz, seed=31)
+    H = rng.normal(size=(ny, nz))
+    r_diag = rng.uniform(0.5, 2.0, size=ny)
+    wb = rng.uniform(0.3, 2.5, size=nz)
+    d = rng.normal(size=ny)
+
+    L = cholesky(Pf, lower=True)
+    G = H.T @ ((1.0 / r_diag)[:, None] * H)
+    h = H.T @ ((1.0 / r_diag) * d)
+
+    Kd, A_factor = kalman_gain_information_from_gram(precision_from_cholesky(L), G, wb, h)
+    Pa = covariance_from_information_factor(A_factor)
+
+    H_hat = H * wb[None, :]
+    K_naive = _naive_kalman_gain(Pf, H_hat, r_diag)
+    np.testing.assert_allclose(Kd, K_naive @ d, rtol=1e-6, atol=1e-8)
+    np.testing.assert_allclose(Pa, (np.eye(nz) - K_naive @ H_hat) @ Pf, rtol=1e-5, atol=1e-7)
 
 
 def test_cholesky_with_repair_recovers_valid_factor_for_borderline_matrix():

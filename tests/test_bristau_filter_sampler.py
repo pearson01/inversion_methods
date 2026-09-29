@@ -152,3 +152,52 @@ def test_filter_and_backward_sampler_run_end_to_end_with_zero_boundary_condition
     assert np.all(np.isfinite(z_mu))
     assert np.all(np.isfinite(z))
     assert residuals.shape[0] == inputs.nperiod * 8
+
+
+def _lognormal_analysis_problem(seed=41, nbasis=5, nbc=0, nr=2, ny=30):
+    rng = np.random.default_rng(seed)
+    nz = nbasis + nbc + nr
+    A = rng.normal(size=(nz, nz))
+    Pf = A @ A.T / nz + 0.05 * np.eye(nz)
+    zf_mu = rng.normal(scale=0.3, size=nz)
+    H = np.hstack([rng.uniform(0.1, 1.0, size=(ny, nbasis)), np.zeros((ny, nr))])
+    r_inv = 1.0 / rng.uniform(0.5, 2.0, size=ny)
+    Y = H @ np.exp(rng.normal(scale=0.5, size=nz)) + rng.normal(scale=0.3, size=ny)
+    G = H.T @ (r_inv[:, None] * H)
+    g = H.T @ (r_inv * Y)
+    prior = {"pdf": "lognormal"}
+    return dict(zf_mu=zf_mu, za_mu_current=zf_mu.copy(), Y=Y, G=G, g=g, Pf=Pf, H=H,
+                xprior=prior, bcprior=None, rprior=prior, nbasis=nbasis, nbc=nbc, nr=nr)
+
+
+@pytest.mark.parametrize("seed", [41, 42, 43])
+def test_iterative_analysis_update_information_and_woodbury_forms_agree(seed):
+    """
+    The two analysis forms are algebraically identical, so with lognormal
+    priors (non-trivial, iteration-dependent Wb) they must follow the same
+    Gauss-Newton path and return the same mean, covariance and flag.
+    """
+    problem = _lognormal_analysis_problem(seed=seed)
+
+    za_info, Pa_info, L_info, conv_info = iterative_analysis_update(**problem, analysis_form="information")
+    za_wood, Pa_wood, L_wood, conv_wood = iterative_analysis_update(**problem, analysis_form="woodbury")
+
+    np.testing.assert_allclose(za_info, za_wood, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(Pa_info, Pa_wood, rtol=1e-10, atol=1e-12)
+    np.testing.assert_array_equal(L_info, L_wood)
+    assert conv_info == conv_wood
+
+
+def test_iterative_analysis_update_defaults_to_information_form():
+    problem = _lognormal_analysis_problem()
+
+    default = iterative_analysis_update(**problem)
+    explicit = iterative_analysis_update(**problem, analysis_form="information")
+
+    for a, b in zip(default, explicit):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_iterative_analysis_update_rejects_unknown_analysis_form():
+    with pytest.raises(ValueError, match="analysis_form"):
+        iterative_analysis_update(**_lognormal_analysis_problem(), analysis_form="kalman")

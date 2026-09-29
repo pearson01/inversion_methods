@@ -6,7 +6,7 @@ import numpy as np
 from dataclasses import dataclass
 from scipy.linalg import cho_solve
 
-from inversion_methods.manipulation.matrix_identities import kalman_gain_woodbury_from_gram, covariance_from_woodbury_factor, _symmetrize_square, _cholesky_with_repair, _sample_gaussian_cholesky
+from inversion_methods.manipulation.matrix_identities import kalman_gain_woodbury_from_gram, covariance_from_woodbury_factor, precision_from_cholesky, kalman_gain_information_from_gram, covariance_from_information_factor, _symmetrize_square, _cholesky_with_repair, _sample_gaussian_cholesky
 from inversion_methods.manipulation.lognormal_transformations import state_vector_mu_transform, build_Wb
 
 
@@ -37,6 +37,7 @@ class amxkf_inputs:
     Y_dic_raw: dict | None = None
     Hz_dic_raw: dict | None = None
     verbose: bool = True
+    analysis_form: str = "information"
 
 
 @dataclass
@@ -327,7 +328,7 @@ def augmented_forecast_model(
     return zf_mu, Pf_aug
 
 
-def iterative_analysis_update(zf_mu, za_mu_current, Y, G, g, Pf, H, xprior, bcprior, rprior, nbasis, nbc, nr, max_inner_iters=5, tol=1e-02):
+def iterative_analysis_update(zf_mu, za_mu_current, Y, G, g, Pf, H, xprior, bcprior, rprior, nbasis, nbc, nr, max_inner_iters=5, tol=1e-02, analysis_form="information"):
 
     """
     Compute an iterative nonlinear analysis update with Anderson acceleration.
@@ -377,6 +378,13 @@ def iterative_analysis_update(zf_mu, za_mu_current, Y, G, g, Pf, H, xprior, bcpr
     tol : float, optional
         Convergence tolerance for the maximum absolute update. Default is
         ``1e-2``.
+    analysis_form : {"information", "woodbury"}, optional
+        How the Kalman gain and analysis covariance are computed. Both are
+        algebraically identical. "information" (the default) factorises
+        the posterior precision ``Pf^-1 + diag(Wb) @ G @ diag(Wb)``
+        directly and is usually faster; "woodbury" uses the Woodbury
+        system ``I + L.T @ diag(Wb) @ G @ diag(Wb) @ L`` and is the more
+        robust choice if Pf becomes badly conditioned.
 
     Returns
     -------
@@ -395,6 +403,20 @@ def iterative_analysis_update(zf_mu, za_mu_current, Y, G, g, Pf, H, xprior, bcpr
 
     L, _, _ = _cholesky_with_repair(Pf)
 
+    if analysis_form == "information":
+        # Pf is fixed across the inner loop, so its inverse is formed once
+        # here and reused by every gain evaluation below.
+        Pf_inv = precision_from_cholesky(L)
+        gain = lambda Wb, h: kalman_gain_information_from_gram(Pf_inv, G, Wb, h)
+        covariance = covariance_from_information_factor
+
+    elif analysis_form == "woodbury":
+        gain = lambda Wb, h: kalman_gain_woodbury_from_gram(L, G, Wb, h)
+        covariance = lambda factor: covariance_from_woodbury_factor(L, factor)
+
+    else:
+        raise ValueError(f"Unknown analysis_form: {analysis_form!r}. Expected 'information' or 'woodbury'.")
+
     for _ in range(max_inner_iters):
 
         z_lin = state_vector_mu_transform(za_mu_current, xprior, bcprior, rprior, nbasis, nbc, nr)
@@ -409,7 +431,7 @@ def iterative_analysis_update(zf_mu, za_mu_current, Y, G, g, Pf, H, xprior, bcpr
         delta = zf_mu - za_mu_current
         h = g - G @ (z_lin + Wb * delta)
 
-        Kd, S_factor = kalman_gain_woodbury_from_gram(L, G, Wb, h)
+        Kd, _ = gain(Wb, h)
         za_proposal = zf_mu + Kd   # this is g(za_current)
 
         f_curr = za_proposal - za_mu_current   # fixed-point residual
@@ -462,18 +484,18 @@ def iterative_analysis_update(zf_mu, za_mu_current, Y, G, g, Pf, H, xprior, bcpr
 
         za_mu_current = za_new
 
-    # Re-linearize at the final za_mu_current so that S_factor (and
+    # Re-linearize at the final za_mu_current so that the gain factor (and
     # therefore Pa) is evaluated at the state that is actually
     # returned, rather than at the iterate from before the loop's last
-    # update. This costs one more O(nz**3) Woodbury evaluation using
-    # the already-cached G, not a fresh O(ny * nz**2) pass through H.
+    # update. This costs one more O(nz**3) gain evaluation using the
+    # already-cached G, not a fresh O(ny * nz**2) pass through H.
     z_lin = state_vector_mu_transform(za_mu_current, xprior, bcprior, rprior, nbasis, nbc, nr)
     Wb = build_Wb(z_lin, xprior, bcprior, rprior, nbasis, nbc)
     delta = zf_mu - za_mu_current
     h = g - G @ (z_lin + Wb * delta)
-    _, S_factor = kalman_gain_woodbury_from_gram(L, G, Wb, h)
+    _, factor = gain(Wb, h)
 
-    Pa = covariance_from_woodbury_factor(L, S_factor)
+    Pa = covariance(factor)
 
     return za_mu_current, Pa, L, converged
 
@@ -555,7 +577,7 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
             # zf_mu[t], Pf[t] = slow_augmented_forecast_model(za_mu[t-1], Pa[t-1], config.F_aug, Q_aug)
 
 
-        za_mu[t], Pa[t], Pf_chol[t], converged = iterative_analysis_update(zf_mu[t], za_mu_current[t], Y, G_list[t], g_list[t], Pf[t], H, config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr)
+        za_mu[t], Pa[t], Pf_chol[t], converged = iterative_analysis_update(zf_mu[t], za_mu_current[t], Y, G_list[t], g_list[t], Pf[t], H, config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr, analysis_form=config.analysis_form)
 
         if converged:
             converge_count += 1

@@ -71,6 +71,14 @@ class InversionParameters:
     tau_resid_prior: dict | None = None
     tau_resid_max: float | None = 200
 
+    # analysis_form (str): How the Kalman gain and analysis covariance are
+    #               computed in the forward filter. "information" (default)
+    #               or "woodbury". Both give the same result; switch to
+    #               "woodbury" if the information form ever runs into
+    #               numerical trouble (e.g. a badly conditioned forecast
+    #               covariance).
+    analysis_form: str = "information"
+
     # --- Multi-chain convergence checking (see multichain.py) -----------
     # nchain (int): Number of independent copies of the Gibbs sampler to run.
     #               1 (the default) just runs the sampler once. Set to e.g. 4 to also get a
@@ -202,6 +210,7 @@ def bristau_function(config: InversionParameters):
         tau_resid=config.tau_resid,
         tau_resid_prior=config.tau_resid_prior,
         tau_resid_max=config.tau_resid_max,
+        analysis_form=config.analysis_form,
         )
 
     end_data = time.time()
