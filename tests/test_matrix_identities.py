@@ -17,7 +17,7 @@ from inversion_methods.manipulation.matrix_identities import (
     woodbury,
     Ainv_B,
     kalman_gain_woodbury,
-    kalman_gain_woodbury_from_cholesky,
+    kalman_gain_woodbury_from_gram,
     covariance_from_woodbury_factor,
     _cholesky_with_repair,
     _sample_gaussian_cholesky,
@@ -65,22 +65,67 @@ def test_kalman_gain_woodbury_matches_naive_formula():
     np.testing.assert_allclose(K_fast, K_naive, rtol=1e-6, atol=1e-8)
 
 
-def test_kalman_gain_woodbury_from_cholesky_matches_naive_and_updates_covariance():
+def test_kalman_gain_woodbury_from_gram_matches_naive_and_updates_covariance():
+    """
+    kalman_gain_woodbury_from_gram is a further reduction of
+    kalman_gain_woodbury for callers (the MXKF's Gauss-Newton loop) that
+    have already reduced the (ny, nz) observation operator down to a fixed,
+    reusable (nz, nz) Gram matrix G = H.T @ diag(r_inv) @ H and vector
+    h = H.T @ diag(r_inv) @ d, and only need to apply the gain to d for
+    varying, per-relinearisation Jacobian weights wb (H_hat = H @ diag(wb)).
+    With wb = ones (no reweighting), it should reduce exactly to applying
+    the plain Kalman gain from kalman_gain_woodbury to d.
+    """
     nz, ny = 4, 15
     Pf = _random_spd(nz, seed=9)
     H = np.random.default_rng(10).normal(size=(ny, nz))
     r_diag = np.random.default_rng(11).uniform(0.5, 2.0, size=ny)
+    d = np.random.default_rng(12).normal(size=ny)
 
     L = cholesky(Pf, lower=True)
-    K_fast, S_factor = kalman_gain_woodbury_from_cholesky(L, H, 1.0 / r_diag)
+    r_inv = 1.0 / r_diag
+    G = H.T @ (r_inv[:, None] * H)
+    h = H.T @ (r_inv * d)
+    wb = np.ones(nz)
+
+    Kd_fast, S_factor = kalman_gain_woodbury_from_gram(L, G, wb, h)
+
     K_naive = _naive_kalman_gain(Pf, H, r_diag)
-    np.testing.assert_allclose(K_fast, K_naive, rtol=1e-6, atol=1e-8)
+    np.testing.assert_allclose(Kd_fast, K_naive @ d, rtol=1e-6, atol=1e-8)
 
     Pa_fast = covariance_from_woodbury_factor(L, S_factor)
     Pa_naive = (np.eye(nz) - K_naive @ H) @ Pf
     np.testing.assert_allclose(Pa_fast, Pa_naive, rtol=1e-5, atol=1e-7)
     np.testing.assert_allclose(Pa_fast, Pa_fast.T)
     assert np.all(np.linalg.eigvalsh(Pa_fast) > -1e-8)
+
+
+def test_kalman_gain_woodbury_from_gram_handles_nontrivial_jacobian_weight():
+    """
+    With a non-trivial wb, kalman_gain_woodbury_from_gram should match the
+    plain Kalman gain applied against the reweighted operator
+    H_hat = H @ diag(wb) -- this is the actual usage pattern inside
+    iterative_analysis_update, where wb comes from build_Wb's lognormal
+    Jacobian and changes at every Gauss-Newton relinearisation without G/h
+    (both built from the fixed, un-reweighted H) ever being recomputed.
+    """
+    nz, ny = 4, 15
+    Pf = _random_spd(nz, seed=15)
+    H = np.random.default_rng(16).normal(size=(ny, nz))
+    r_diag = np.random.default_rng(17).uniform(0.5, 2.0, size=ny)
+    wb = np.random.default_rng(18).uniform(0.3, 2.5, size=nz)
+    d = np.random.default_rng(19).normal(size=ny)
+
+    L = cholesky(Pf, lower=True)
+    r_inv = 1.0 / r_diag
+    G = H.T @ (r_inv[:, None] * H)  # not yet weighted by wb
+    h = H.T @ (r_inv * d)  # not yet weighted by wb
+
+    Kd_fast, _S_factor = kalman_gain_woodbury_from_gram(L, G, wb, h)
+
+    H_hat = H * wb[None, :]  # H_hat = H @ diag(wb)
+    K_naive = _naive_kalman_gain(Pf, H_hat, r_diag)
+    np.testing.assert_allclose(Kd_fast, K_naive @ d, rtol=1e-6, atol=1e-8)
 
 
 def test_cholesky_with_repair_recovers_valid_factor_for_borderline_matrix():

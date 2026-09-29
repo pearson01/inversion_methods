@@ -327,7 +327,7 @@ def augmented_forecast_model(
     return zf_mu, Pf_aug
 
 
-def iterative_analysis_update(zf_mu, za_mu_current, Y, r, r_inv, Pf, H, xprior, bcprior, rprior, nbasis, nbc, nr, max_inner_iters=5, tol=1e-02):
+def iterative_analysis_update(zf_mu, za_mu_current, Y, G, g, Pf, H, xprior, bcprior, rprior, nbasis, nbc, nr, max_inner_iters=5, tol=1e-02):
 
     """
     Compute an iterative nonlinear analysis update with Anderson acceleration.
@@ -350,14 +350,19 @@ def iterative_analysis_update(zf_mu, za_mu_current, Y, r, r_inv, Pf, H, xprior, 
         Initial analysis-mean estimate in optimisation space.
     Y : numpy.ndarray
         Observation vector.
-    r : numpy.ndarray
-        Observation-error covariance matrix.
-    r_inv : numpy.ndarray
-        Inverse observation-error covariance matrix.
+    G : numpy.ndarray
+        State-space Gram matrix ``H.T @ diag(r_inv) @ H``, precomputed by the
+        caller (see iterative_augmented_mxkf) since it depends only on the
+        fixed H/r_inv for this period, not on Pf or za_mu_current.
+    g : numpy.ndarray
+        State-space vector ``H.T @ diag(r_inv) @ Y``, precomputed alongside G
+        for the same reason.
     Pf : numpy.ndarray
         Forecast-error covariance matrix.
     H : numpy.ndarray
-        Observation operator for the transformed state.
+        Observation operator for the transformed state. Still needed here
+        (rather than only by the caller) for the observation-space misfit
+        checks below, which evaluate H @ z at the current linearisation.
     xprior, bcprior, rprior : array-like
         Prior information used by the state transformation and its
         linearisation.
@@ -389,11 +394,6 @@ def iterative_analysis_update(zf_mu, za_mu_current, Y, r, r_inv, Pf, H, xprior, 
     converged = False
 
     L, _, _ = _cholesky_with_repair(Pf)
-
-    HTrinv = H.T * r_inv[None,:]
-    G = HTrinv @ H
-    g = HTrinv @ Y
-
 
     for _ in range(max_inner_iters):
 
@@ -506,23 +506,46 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
     za_mu = np.zeros((config.nperiod, nz))
     Pa = np.zeros((config.nperiod, nz, nz))
 
+    # ------------------------------------------------------------------
+    # Precompute the per-period state-space Gram reduction, G_t = H_t.T @
+    # diag(r_inv_t) @ H_t and g_t = H_t.T @ diag(r_inv_t) @ Y_t, before the
+    # sequential filter recursion below.
+    #
+    # This is the dominant cost of the forward filter (O(ny_t * nz**2) per
+    # period), but unlike zf_mu/Pf/za_mu/Pa it does not depend on the
+    # recursion at all -- only on the fixed H_t/Y_t and this iteration's
+    # (shared, scalar, unless a period-varying err_var_dic is supplied)
+    # r_inv_t. Computing every period's G_t/g_t here, in one pass with no
+    # cross-period dependency, rather than recomputing it once per period
+    # interleaved inside the recursive loop, is a pure reordering of the
+    # same arithmetic -- it changes nothing about the numbers produced.
+    # ------------------------------------------------------------------
+    G_list = [None] * config.nperiod
+    g_list = [None] * config.nperiod
+
+    for t in range(config.nperiod):
+        H_t = config.Hz_dic[t]
+        Y_t = config.Y_dic[t]
+
+        if config.err_var_dic is not None:
+            # Precomputed, e.g. by an AR(1)/OU residual-correlation whitening
+            # step. Falls back to the plain i.i.d. formula below when absent,
+            # so callers that don't use that feature are unaffected.
+            err_var_inv = 1 / config.err_var_dic[t]
+        else:
+            sigma_obs = config.sigma_obs_dic[t]
+            err_var_inv = 1 / (config.sigma2_rep + sigma_obs**2)
+
+        HTrinv = H_t.T * err_var_inv[None, :]
+        G_list[t] = HTrinv @ H_t
+        g_list[t] = HTrinv @ Y_t
+
     za_mu_current = zf_mu.copy() if config.za_mu_warmstart is None else config.za_mu_warmstart.copy()
     converge_count = 0
 
     for t in range(config.nperiod):
         H = config.Hz_dic[t]
         Y = config.Y_dic[t]
-
-        if config.err_var_dic is not None:
-            # Precomputed, e.g. by an AR(1)/OU residual-correlation whitening
-            # step. Falls back to the plain i.i.d. formula below when absent,
-            # so callers that don't use that feature are unaffected.
-            err_var = config.err_var_dic[t]
-        else:
-            sigma_obs = config.sigma_obs_dic[t]
-            err_var = config.sigma2_rep + sigma_obs**2
-
-        err_var_inv = 1 / err_var
 
         if t == 0:
             zf_mu[t] = config.zprior_mus
@@ -532,8 +555,8 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
             # zf_mu[t], Pf[t] = slow_augmented_forecast_model(za_mu[t-1], Pa[t-1], config.F_aug, Q_aug)
 
 
-        za_mu[t], Pa[t], Pf_chol[t], converged = iterative_analysis_update(zf_mu[t], za_mu_current[t], Y, err_var, err_var_inv, Pf[t], H, config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr)
-        
+        za_mu[t], Pa[t], Pf_chol[t], converged = iterative_analysis_update(zf_mu[t], za_mu_current[t], Y, G_list[t], g_list[t], Pf[t], H, config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr)
+
         if converged:
             converge_count += 1
                 

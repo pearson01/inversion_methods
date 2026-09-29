@@ -6,7 +6,6 @@ from scipy.linalg import cholesky
 
 from inversion_methods.bristau.bristau_filter_sampler import (
     augmented_forecast_model,
-    analysis_covariance_update,
     iterative_analysis_update,
     iterative_augmented_mxkf,
     augmented_backward_sampler,
@@ -76,24 +75,6 @@ def test_augmented_forecast_model_boundary_conditions_are_persistent():
     np.testing.assert_allclose(zf_mu[nbasis:nbasis + nbc], z_mu[nbasis:nbasis + nbc])
 
 
-def test_analysis_covariance_update_matches_joseph_form():
-    nz, ny = 4, 6
-    rng = np.random.default_rng(22)
-    A = rng.normal(size=(nz, nz))
-    Pf = A @ A.T + nz * np.eye(nz)
-    H_hat = rng.normal(size=(ny, nz))
-    r = rng.uniform(0.5, 2.0, size=ny)
-    K = rng.normal(size=(nz, ny)) * 0.1
-
-    Pa = analysis_covariance_update(K, H_hat, Pf, r)
-
-    I_KH = np.eye(nz) - K @ H_hat
-    expected = I_KH @ Pf @ I_KH.T + K @ np.diag(r) @ K.T
-
-    np.testing.assert_allclose(Pa, expected, rtol=1e-8, atol=1e-10)
-    np.testing.assert_allclose(Pa, Pa.T)
-
-
 def test_iterative_analysis_update_matches_closed_form_linear_kalman_filter():
     """
     With all-normal priors, state_vector_mu_transform/build_Wb become
@@ -114,8 +95,12 @@ def test_iterative_analysis_update_matches_closed_form_linear_kalman_filter():
     rprior = {"pdf": "normal"}
     nbasis, nbc, nr = 2, 0, 2
 
-    za_mu, Pa, converged = iterative_analysis_update(
-        zf_mu, za_mu_current=zf_mu.copy(), Y=Y, r=r, r_inv=1.0 / r, Pf=Pf, H=H,
+    r_inv = 1.0 / r
+    G = H.T @ (r_inv[:, None] * H)
+    g = H.T @ (r_inv * Y)
+
+    za_mu, Pa, _L, converged = iterative_analysis_update(
+        zf_mu, za_mu_current=zf_mu.copy(), Y=Y, G=G, g=g, Pf=Pf, H=H,
         xprior=xprior, bcprior=None, rprior=rprior, nbasis=nbasis, nbc=nbc, nr=nr,
     )
 
@@ -151,7 +136,7 @@ def _make_amxkf_inputs_no_bc(nperiod=3, nbasis=3, nxout=1, nr=2, ny_per_period=8
         siteindicator_dic=siteindicator_dic, nbasis=nbasis, zprior_mus=np.zeros(nz),
         zprior_sigma2s=np.full(nz, 1.0), forecast_noise=np.full(nz, 0.01), nperiod=nperiod,
         sigma2_rep=0.01, kappa_x_vector=np.array([0.5, 0.5]), xprior=xprior, bcprior=None,
-        rprior=rprior, nbc=None, nr=nr, nxout=nxout,
+        rprior=rprior, nbc=None, nr=nr, nxout=nxout, iteration=0, verbose=False,
     )
 
 

@@ -62,7 +62,7 @@ def test_state_vector_mu_transform_exponentiates_only_lognormal_blocks():
     np.testing.assert_allclose(z[-nr:], np.exp(z_mu[-nr:]))
 
 
-def test_build_wb_matches_expected_diagonal():
+def test_build_wb_matches_expected_weights():
     xprior = {"pdf": "lognormal"}
     bcprior = {"pdf": "normal"}
     rprior = {"pdf": "lognormal"}
@@ -71,9 +71,11 @@ def test_build_wb_matches_expected_diagonal():
     zf = np.array([2.0, 3.0, 5.0, 7.0, 1.5, 2.5])  # already in natural space
     Wb = build_Wb(zf, xprior, bcprior, rprior, nbasis, nbc)
 
-    expected_diag = np.array([2.0, 3.0, 1.0, 1.0, 1.5, 2.5])
-    np.testing.assert_allclose(np.diag(Wb), expected_diag)
-    assert np.count_nonzero(Wb - np.diag(np.diag(Wb))) == 0  # purely diagonal
+    # build_Wb returns the diagonal of the Jacobian weighting as a plain
+    # vector -- callers apply it elementwise (`Wb * delta`), never as a
+    # dense diagonal matrix -- so the expected value is a vector too.
+    expected = np.array([2.0, 3.0, 1.0, 1.0, 1.5, 2.5])
+    np.testing.assert_allclose(Wb, expected)
 
 
 def test_covariance_lognormal_transform_matches_manual_formula():
