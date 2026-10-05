@@ -27,7 +27,7 @@ class InversionParameters:
     xprior: dict
     bcprior: dict
     rprior: dict
-    sigma2_rep_prior: dict
+    sigma2_exc_prior: dict
     sigma2_qx_prior: dict
     sigma_qbc: float
     sigma_qr: float    
@@ -58,8 +58,8 @@ class InversionParameters:
     country_unit_prefix: str = "T"
     basis_output_path: str | None = None
     bc_freq: str | None = None
-    sigma_rep: str | float | None = 'global additive'
-    sigma_rep_max: float | None = 100.0
+    sigma_exc: str | float | None = 'global additive'
+    sigma_exc_max: float | None = 100.0
     sigma_qx: str | float = "inner outer"
     sigma_qx_max: float | None = 0.5
     kappa_x: str | float | None = 0.0
@@ -190,7 +190,7 @@ def bristau_function(config: InversionParameters):
         xprior=xprior,
         bcprior=bcprior,
         rprior=config.rprior,
-        sigma2_rep_prior=config.sigma2_rep_prior,
+        sigma2_exc_prior=config.sigma2_exc_prior,
         sigma2_qx_prior=config.sigma2_qx_prior,
         sigma_qbc=config.sigma_qbc,
         sigma_qr=config.sigma_qr,
@@ -198,8 +198,8 @@ def bristau_function(config: InversionParameters):
         iterations=config.iterations,
         inner_group_id=inner_group_id,
         ningroup=ningroup,
-        sigma_rep=config.sigma_rep,
-        sigma_rep_max=config.sigma_rep_max,
+        sigma_exc=config.sigma_exc,
+        sigma_exc_max=config.sigma_exc_max,
         sigma_qx=config.sigma_qx,
         sigma_qx_max=config.sigma_qx_max,
         kappa_x=config.kappa_x,
@@ -241,7 +241,7 @@ def bristau_function(config: InversionParameters):
     (xtrace,
     bctrace,
     rtrace,
-    var_rep_trace,
+    var_exc_trace,
     sigma2_qx_trace,
     kappa_x_trace,
     sigma2_qx_trace_labels,
@@ -260,7 +260,7 @@ def bristau_function(config: InversionParameters):
     post_process_input = PostProcessInput(xtrace=xtrace,
                                           bctrace=bctrace,
                                           rtrace=rtrace,
-                                          var_rep_trace=var_rep_trace,
+                                          var_exc_trace=var_exc_trace,
                                           sigma2_qx_trace=sigma2_qx_trace,
                                           sigma2_qx_trace_labels=sigma2_qx_trace_labels,
                                           kappa_x_trace=kappa_x_trace,

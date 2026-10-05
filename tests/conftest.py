@@ -11,7 +11,7 @@ def rng():
 @pytest.fixture(autouse=True)
 def seed_global_numpy_random():
     """
-    Several bristau samplers (kappa_x.sample_kappa, sigma_rep.sample_sigma2_rep)
+    Several bristau samplers (kappa_x.sample_kappa, sigma_exc.sample_sigma2_exc)
     draw from the *global* numpy random state rather than an injected
     Generator. Reseed it before every test so results are reproducible and
     tests can't leak randomness into one another.

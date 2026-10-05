@@ -126,11 +126,13 @@ retained iteration.
 are resampled conditional on the newly sampled state trajectory (residuals between consecutive
 months, `state_residuals`):
 
-- `update_sigma2_rep` ([sigma_rep.py](inversion_methods/bristau/sigma_rep.py)) - additional
-  ("representation") observation-error variance, on top of the reported instrument/model
-  measurement error `sigma_obs`. Under the `"global additive"` scheme it is drawn via a
-  Metropolis/slice update (`sigma2_rep_log_posterior`) targeting a scaled-Beta prior on
-  `sigma2_rep / sigma2_rep_max`, bounded above by `sigma_rep_max**2`; under `"fixed additive"` it
+- `update_sigma2_exc` ([sigma_exc.py](inversion_methods/bristau/sigma_exc.py)) - excess
+  model-data mismatch variance, on top of the stated observation uncertainty `sigma_obs`
+  (total likelihood variance `sigma_obs**2 + sigma2_exc`). It is expected to be dominated by
+  forward-model error (transport, representation, aggregation, boundary conditions) but also
+  absorbs any measurement error not captured by `sigma_obs`. Under the `"global additive"` scheme it is drawn via a
+  Metropolis/slice update (`sigma2_exc_log_posterior`) targeting a scaled-Beta prior on
+  `sigma2_exc / sigma2_exc_max`, bounded above by `sigma_exc_max**2`; under `"fixed additive"` it
   is held at the user-supplied value.
 - `update_sigma2_qx` ([siqma_qx.py](inversion_methods/bristau/siqma_qx.py)) - the state
   process-noise variance(s) controlling how much basis-function scalings are allowed to drift
@@ -144,7 +146,7 @@ months, `state_residuals`):
   inversion windows.
 
 All three updates accept `"fixed"` values (skipping sampling entirely) or hyperparameter priors
-(`sigma2_rep_prior`, `sigma2_qx_prior`, `kappa_x_prior`, each parsed by `prior_parser` into
+(`sigma2_exc_prior`, `sigma2_qx_prior`, `kappa_x_prior`, each parsed by `prior_parser` into
 shape/scale-style parameters) when sampling is enabled.
 
 **Post-processing.** `haffbs_postprocessouts` combines the retained trace arrays into posterior

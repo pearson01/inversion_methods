@@ -135,7 +135,7 @@ def _make_amxkf_inputs_no_bc(nperiod=3, nbasis=3, nxout=1, nr=2, ny_per_period=8
         Y_dic=Y_dic, sigma_obs_dic=sigma_obs_dic, Ytime_dic=Ytime_dic, Hz_dic=Hz_dic,
         siteindicator_dic=siteindicator_dic, nbasis=nbasis, zprior_mus=np.zeros(nz),
         zprior_sigma2s=np.full(nz, 1.0), forecast_noise=np.full(nz, 0.01), nperiod=nperiod,
-        sigma2_rep=0.01, kappa_x_vector=np.array([0.5, 0.5]), xprior=xprior, bcprior=None,
+        sigma2_exc=0.01, kappa_x_vector=np.array([0.5, 0.5]), xprior=xprior, bcprior=None,
         rprior=rprior, nbc=None, nr=nr, nxout=nxout, iteration=0, verbose=False,
     )
 

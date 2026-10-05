@@ -22,7 +22,7 @@ def _make_small_inversion_input(iterations=40, seed=0):
     A tiny, fully-synthetic InversionInput -- fast enough to run several
     times per test, but real enough to exercise the whole Gibbs loop.
 
-    sigma_rep is left as the (sampled) 'global additive' scheme so at
+    sigma_exc is left as the (sampled) 'global additive' scheme so at
     least one hyperparameter genuinely varies across iterations, in
     addition to the emissions state itself; sigma_qx and kappa_x are
     fixed, purely to keep this toy problem simple and fast.
@@ -54,11 +54,11 @@ def _make_small_inversion_input(iterations=40, seed=0):
         Hx_dic=Hx_dic, Hbc_dic={}, siteindicator_dic=siteindicator_dic,
         nperiod=nperiod, nbc=0, nxout=nxout, nr=nr, nbasis=nbasis,
         xprior=xprior, bcprior=None, rprior=rprior,
-        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        sigma2_exc_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
         sigma2_qx_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
         sigma_qbc=0.0, sigma_qr=0.1, kappa_x_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
         iterations=iterations, inner_group_id=None, ningroup=None,
-        sigma_rep="global additive", sigma_rep_max=100.0,
+        sigma_exc="global additive", sigma_exc_max=100.0,
         sigma_qx=0.02, sigma_qx_max=0.5,
         kappa_x=0.3, kappa_x_minfold=1, kappa_bc=None, kappa_r=0.0,
     )
@@ -154,7 +154,7 @@ def test_summarise_and_stack_round_trip():
     full_result = _run_one_chain(config, seed, keep_full_output=True)
 
     summary = _summarise_chain_output(full_result)
-    assert set(summary.keys()) == {"sigma2_rep", "sigma2_qx", "kappa_x", "tau_resid", "mean_x"}
+    assert set(summary.keys()) == {"sigma2_exc", "sigma2_qx", "kappa_x", "tau_resid", "mean_x"}
     assert summary["mean_x"].shape == (full_result[0].shape[0], full_result[0].shape[1])
 
     stacked = _stack_summaries([summary, summary])
@@ -216,7 +216,7 @@ def test_run_chains_two_chains_end_to_end():
     assert xtrace.shape == (n_retained, config.nperiod, config.nbasis)
 
     assert report["nchain"] == 2
-    assert set(report["parameters"].keys()) == {"sigma2_rep", "sigma2_qx", "kappa_x", "tau_resid", "mean_x"}
+    assert set(report["parameters"].keys()) == {"sigma2_exc", "sigma2_qx", "kappa_x", "tau_resid", "mean_x"}
     assert isinstance(report["converged"], bool)
 
 

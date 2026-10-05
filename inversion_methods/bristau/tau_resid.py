@@ -15,7 +15,7 @@ process). Because an AR(1)/OU process has a tridiagonal precision matrix,
 removing the correlation is a cheap, one-shot, vectorised GLS decorrelation
 transform applied directly to the fixed (Y, Hz) data -- it never touches the
 evolving state, so it can be recomputed once per Gibbs iteration (after
-`tau` and `sigma2_rep` are resampled) with no changes needed to the
+`tau` and `sigma2_exc` are resampled) with no changes needed to the
 Kalman-gain/Woodbury machinery in `bristau_filter_sampler.py` or
 `matrix_identities.py`. The transform only removes correlation
 (whiten_observations()'s own output covariance is diag(err_var), not I);
@@ -34,7 +34,7 @@ import numpy as np
 def tau_scheme_select(config):
     """
     Select the tau (residual-correlation-length) scheme from
-    config.tau_resid, mirroring kappa_x_scheme_select / sigma_rep_scheme_select.
+    config.tau_resid, mirroring kappa_x_scheme_select / sigma_exc_scheme_select.
     """
     tau_is_fixed = (
         isinstance(config.tau_resid, (int, float, np.integer, np.floating))
@@ -170,20 +170,20 @@ def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigm
     return prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, gap_flat, prev_index_flat
 
 
-def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, sigma2_rep, tau, nperiod):
+def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, sigma2_exc, tau, nperiod):
     """
     One-shot GLS whitening transform for the AR(1)/OU residual-correlation
     model, phi(gap) = exp(-gap / tau).
 
     Only ever uses fixed, precomputed data (Y_dic, Hz_dic, and the same-site
     adjacency from prepare_ar1_indexing) -- never the evolving state -- so it
-    is cheap to recompute every Gibbs iteration as new tau/sigma2_rep values
+    is cheap to recompute every Gibbs iteration as new tau/sigma2_exc values
     are drawn, and its output (Y, Hz, err_var) can be fed directly into the
     existing, unmodified diagonal-R Kalman-gain machinery.
 
     phi is the *correlation* between an observation's residual and its
     preceding same-site residual, not a raw AR coefficient, so the two need
-    not share the same marginal variance (err_var = sigma2_rep +
+    not share the same marginal variance (err_var = sigma2_exc +
     sigma_obs**2 can differ between them if sigma_obs does). For jointly
     Gaussian residuals with correlation phi and marginal variances
     err_var_i, err_var_prev:
@@ -204,7 +204,7 @@ def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, pr
 
     for t in range(nperiod):
         sigma_obs = sigma_obs_dic[t]
-        err_var = sigma2_rep + sigma_obs**2
+        err_var = sigma2_exc + sigma_obs**2
 
         if tau is None or tau <= 0:
             Y_out[t] = Y_dic[t]
@@ -223,7 +223,7 @@ def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, pr
         # slower.
         phi[phi < np.finfo(float).eps] = 0.0
 
-        err_var_prev = sigma2_rep + prev_sigma_obs_dic[t]**2
+        err_var_prev = sigma2_exc + prev_sigma_obs_dic[t]**2
         ratio = np.where(has_prev, np.sqrt(err_var / np.maximum(err_var_prev, 1e-12)), 1.0)
         phi_mean = phi * ratio
 
@@ -234,12 +234,12 @@ def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, pr
     return Y_out, Hz_out, err_var_out
 
 
-def prepare_tau_sampler_inputs(state_residuals, sigma_obs, sigma2_rep, prev_index_flat):
+def prepare_tau_sampler_inputs(state_residuals, sigma_obs, sigma2_exc, prev_index_flat):
     """
     Build the standardised-residual arrays consumed by sample_tau(), from the
     raw (unwhitened) residuals of the just-completed FFBS sweep.
     """
-    err_var = sigma2_rep + sigma_obs**2
+    err_var = sigma2_exc + sigma_obs**2
     standardised = state_residuals / np.sqrt(err_var)
 
     has_prev = prev_index_flat >= 0
@@ -249,14 +249,14 @@ def prepare_tau_sampler_inputs(state_residuals, sigma_obs, sigma2_rep, prev_inde
     return standardised, prev_standardised, has_prev
 
 
-def update_tau_resid(state_residuals, sigma_obs, tau_aprior, tau_bprior, tau_max, tau_scheme, tau_current, fixed_tau, sigma2_rep_current, obs_prev_index_flat, obs_gap_flat, rng=None):
+def update_tau_resid(state_residuals, sigma_obs, tau_aprior, tau_bprior, tau_max, tau_scheme, tau_current, fixed_tau, sigma2_exc_current, obs_prev_index_flat, obs_gap_flat, rng=None):
 
 
     if tau_scheme == "fixed":
             tau_current = fixed_tau
     else:
         standardised, prev_standardised, has_prev = prepare_tau_sampler_inputs(
-            state_residuals, sigma_obs, sigma2_rep_current, obs_prev_index_flat,
+            state_residuals, sigma_obs, sigma2_exc_current, obs_prev_index_flat,
         )
         tau_current = sample_tau(
             tau_current, tau_max, standardised, prev_standardised, has_prev,
@@ -268,7 +268,7 @@ def update_tau_resid(state_residuals, sigma_obs, tau_aprior, tau_bprior, tau_max
 def tau_log_posterior(log_tau, tau_max, standardised, prev_standardised, has_prev, gap, alpha_prior, beta_prior):
     """
     Log posterior for tau under a scaled-Beta prior on tau / tau_max,
-    mirroring sigma_rep.sigma2_rep_log_posterior's slice-sampler-friendly
+    mirroring sigma_exc.sigma2_exc_log_posterior's slice-sampler-friendly
     log-transformed form.
     """
     tau = np.exp(log_tau)
@@ -293,7 +293,7 @@ def tau_log_posterior(log_tau, tau_max, standardised, prev_standardised, has_pre
 
 def sample_tau(tau_current, tau_max, standardised, prev_standardised, has_prev, gap, alpha_prior, beta_prior, w=1.0, m=100, rng=None):
     """
-    Slice sampler for tau, directly analogous to sigma_rep.sample_sigma2_rep.
+    Slice sampler for tau, directly analogous to sigma_exc.sample_sigma2_exc.
 
     rng : numpy.random.Generator, optional
         Source of randomness for this draw. Defaults to plain

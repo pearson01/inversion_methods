@@ -35,7 +35,7 @@ def ini_extract_param(
                       "xprior",
                       "bcprior",
                       "rprior",
-                      "sigma2_rep_prior",
+                      "sigma2_exc_prior",
                       "sigma2_qx_prior",
                       "kappa_x_prior",
                       "sigma_qbc",

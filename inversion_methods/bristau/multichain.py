@@ -49,7 +49,7 @@ from inversion_methods.bristau.inversion_bristau import augmented_ffbs_mxkf_gibb
 # one in the tuple returned by augmented_ffbs_mxkf_gibbs_multi_slice.
 #
 #   index 0: xtrace           -- the full emissions state (kept only for the keeper chain)
-#   index 3: var_rep_trace    -- sigma2_rep (observation "representation error" variance)
+#   index 3: var_exc_trace    -- sigma2_exc (excess model-data mismatch variance)
 #   index 4: sigma2_qx_trace  -- flux forecast noise variance(s)
 #   index 5: kappa_x_trace    -- flux persistence parameter(s)
 #   index 8: tau_trace        -- same-site residual correlation length(s)
@@ -65,7 +65,7 @@ def _summarise_chain_output(gibbs_output):
     the large per-basis-function emissions trace (xtrace).
 
     We keep:
-      - The hyperparameter traces (sigma2_rep, sigma2_qx, kappa_x, tau).
+      - The hyperparameter traces (sigma2_exc, sigma2_qx, kappa_x, tau).
         These are the values most likely to mix slowly, since each one is
         shared across many basis functions/observations and is sampled
         conditional on everything else in the model. Note that if any of
@@ -83,12 +83,12 @@ def _summarise_chain_output(gibbs_output):
         free-to-compute check that the emissions state itself is mixing
         well, not just the hyperparameters.
     """
-    (xtrace, _bctrace, _rtrace, var_rep_trace, sigma2_qx_trace,
+    (xtrace, _bctrace, _rtrace, var_exc_trace, sigma2_qx_trace,
      kappa_x_trace, _sigma2_qx_labels, _kappa_x_labels, tau_trace,
      _tau_labels) = gibbs_output
 
     return {
-        "sigma2_rep": var_rep_trace,
+        "sigma2_exc": var_exc_trace,
         "sigma2_qx": sigma2_qx_trace,
         "kappa_x": kappa_x_trace,
         "tau_resid": tau_trace,

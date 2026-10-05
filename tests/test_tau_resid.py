@@ -91,7 +91,7 @@ def test_whiten_observations_is_exact_noop_when_tau_is_zero():
 
     Y_out, Hz_out, err_var_out = whiten_observations(
         Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic,
-        sigma2_rep=2.0, tau=0.0, nperiod=2,
+        sigma2_exc=2.0, tau=0.0, nperiod=2,
     )
 
     for t in range(2):
@@ -110,17 +110,17 @@ def test_whiten_observations_matches_manual_gls_formula():
         Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigma_obs_dic, nperiod=2,
     )
 
-    tau, sigma2_rep = 4.0, 0.0
+    tau, sigma2_exc = 4.0, 0.0
     Y_out, Hz_out, err_var_out = whiten_observations(
         Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic,
-        sigma2_rep=sigma2_rep, tau=tau, nperiod=2,
+        sigma2_exc=sigma2_exc, tau=tau, nperiod=2,
     )
 
     # Period 1, row 0: site B, gap=7h since its predecessor (period 0, row 1).
     phi = np.exp(-7.0 / tau)
     expected_Y = 4.0 - phi * 2.0
     expected_H = np.array([2.0, 0.0]) - phi * np.array([0.0, 1.0])
-    expected_err_var = (sigma2_rep + 0.1**2) * (1 - phi**2)
+    expected_err_var = (sigma2_exc + 0.1**2) * (1 - phi**2)
 
     assert Y_out[1][0] == pytest.approx(expected_Y)
     np.testing.assert_allclose(Hz_out[1][0], expected_H)
@@ -128,7 +128,7 @@ def test_whiten_observations_matches_manual_gls_formula():
 
     # Rows with no predecessor are untouched.
     assert Y_out[0][0] == pytest.approx(Y_dic[0][0])
-    assert err_var_out[0][0] == pytest.approx(sigma2_rep + sigma_obs_dic[0][0] ** 2)
+    assert err_var_out[0][0] == pytest.approx(sigma2_exc + sigma_obs_dic[0][0] ** 2)
 
 
 def test_whiten_observations_applies_variance_ratio_when_sigma_obs_differs():
@@ -151,15 +151,15 @@ def test_whiten_observations_applies_variance_ratio_when_sigma_obs_differs():
         Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigma_obs_dic, nperiod=1,
     )
 
-    tau, sigma2_rep = 5.0, 1.0
+    tau, sigma2_exc = 5.0, 1.0
     Y_out, Hz_out, err_var_out = whiten_observations(
         Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic,
-        sigma2_rep=sigma2_rep, tau=tau, nperiod=1,
+        sigma2_exc=sigma2_exc, tau=tau, nperiod=1,
     )
 
     phi = np.exp(-3.0 / tau)
-    err_var_1 = sigma2_rep + 0.5**2
-    err_var_0 = sigma2_rep + 0.1**2
+    err_var_1 = sigma2_exc + 0.5**2
+    err_var_0 = sigma2_exc + 0.1**2
     ratio = np.sqrt(err_var_1 / err_var_0)
     phi_mean = phi * ratio
 
@@ -211,7 +211,7 @@ def test_prepare_tau_sampler_inputs_aligns_predecessor_correctly():
     prev_index_flat = np.array([-1, -1, 0, 1, 2])
 
     standardised, prev_standardised, has_prev = prepare_tau_sampler_inputs(
-        state_residuals, sigma_obs, sigma2_rep=0.0, prev_index_flat=prev_index_flat,
+        state_residuals, sigma_obs, sigma2_exc=0.0, prev_index_flat=prev_index_flat,
     )
 
     np.testing.assert_array_equal(has_prev, [False, False, True, True, True])
@@ -230,7 +230,7 @@ def test_update_tau_resid_fixed_scheme_never_calls_sampler():
     result = update_tau_resid(
         state_residuals=np.array([1.0, -1.0]), sigma_obs=np.array([0.1, 0.1]),
         tau_aprior=None, tau_bprior=None, tau_max=None, tau_scheme="fixed",
-        tau_current=0.0, fixed_tau=0.0, sigma2_rep_current=1.0,
+        tau_current=0.0, fixed_tau=0.0, sigma2_exc_current=1.0,
         obs_prev_index_flat=np.array([-1, 0]), obs_gap_flat=np.array([0.0, 1.0]),
     )
     assert result == pytest.approx(0.0)
@@ -257,7 +257,7 @@ def test_whiten_observations_flushes_negligible_correlations_to_zero():
 
     Y_out, Hz_out, err_var_out = whiten_observations(
         Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic,
-        sigma2_rep=2.0, tau=tau, nperiod=2,
+        sigma2_exc=2.0, tau=tau, nperiod=2,
     )
 
     tiny = np.finfo(float).tiny

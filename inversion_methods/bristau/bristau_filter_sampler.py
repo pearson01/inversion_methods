@@ -22,7 +22,7 @@ class amxkf_inputs:
     zprior_sigma2s : np.ndarray
     forecast_noise: np.ndarray
     nperiod: int
-    sigma2_rep: float
+    sigma2_exc: float
     kappa_x_vector: np.ndarray
     xprior: dict
     bcprior: dict
@@ -556,7 +556,7 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
             err_var_inv = 1 / config.err_var_dic[t]
         else:
             sigma_obs = config.sigma_obs_dic[t]
-            err_var_inv = 1 / (config.sigma2_rep + sigma_obs**2)
+            err_var_inv = 1 / (config.sigma2_exc + sigma_obs**2)
 
         HTrinv = H_t.T * err_var_inv[None, :]
         G_list[t] = HTrinv @ H_t
@@ -587,8 +587,8 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
         print(f"            {converge_count} convergences in {config.nperiod} MXKF time steps")
 
     # The backward sampler computes residuals (Y_dic - Hz_dic @ z) purely as a
-    # diagnostic fed to the sigma2_rep/sigma2_qx Gibbs updates. Those updates
-    # assume the residual's marginal variance is sigma2_rep + sigma_obs**2, so
+    # diagnostic fed to the sigma2_exc/sigma2_qx Gibbs updates. Those updates
+    # assume the residual's marginal variance is sigma2_exc + sigma_obs**2, so
     # they need the *raw* (unwhitened) Y/Hz, not whatever was used internally
     # above to drive the Kalman gain. Defaults to the same dict when no
     # whitening is in use, i.e. unchanged behaviour.

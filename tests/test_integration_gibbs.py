@@ -16,12 +16,12 @@ Gibbs loop, not just the unit-level `update_kappa_x` call):
    TypeError. Every use_bc=False inversion currently crashes.
 
 2. In `augmented_ffbs_mxkf_gibbs_multi_slice`, the guard that decides
-   whether `sigma2_rep_prior` needs parsing checks
+   whether `sigma2_exc_prior` needs parsing checks
    `sigma_qx_scheme != "fixed additive"` -- but `sigma_qx_scheme` can never
-   equal that string (it belongs to sigma_rep's scheme vocabulary, not
+   equal that string (it belongs to sigma_exc's scheme vocabulary, not
    sigma_qx's). The condition is therefore always True, so a fixed numeric
-   `sigma_rep` still requires a valid `sigma2_rep_prior`/`sigma_rep_max`,
-   contradicting the documented "(only read if sigma_rep is a string)"
+   `sigma_exc` still requires a valid `sigma2_exc_prior`/`sigma_exc_max`,
+   contradicting the documented "(only read if sigma_exc is a string)"
    contract in the example .ini files.
 
 3. The prior-variance construction only includes the outer-basis-function
@@ -48,7 +48,7 @@ from inversion_methods.bristau.inversion_bristau import (
 
 def _make_inversion_input(
     nperiod=3, nbasis=4, nxout=2, nr=2, ny_per_period=6, iterations=8,
-    sigma_rep=5.0, sigma2_rep_prior=None, sigma_rep_max=100.0,
+    sigma_exc=5.0, sigma2_exc_prior=None, sigma_exc_max=100.0,
     sigma_qx=0.02, kappa_x="inner outer", nbc=0, seed=0,
 ):
     rng = np.random.default_rng(seed)
@@ -72,11 +72,11 @@ def _make_inversion_input(
         Hx_dic=Hx_dic, Hbc_dic={}, siteindicator_dic=siteindicator_dic,
         nperiod=nperiod, nbc=nbc, nxout=nxout, nr=nr, nbasis=nbasis,
         xprior=xprior, bcprior=None, rprior=rprior,
-        sigma2_rep_prior=sigma2_rep_prior,
+        sigma2_exc_prior=sigma2_exc_prior,
         sigma2_qx_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
         sigma_qbc=0.0, sigma_qr=0.1, kappa_x_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
         iterations=iterations, inner_group_id=None, ningroup=None,
-        sigma_rep=sigma_rep, sigma_rep_max=sigma_rep_max,
+        sigma_exc=sigma_exc, sigma_exc_max=sigma_exc_max,
         sigma_qx=sigma_qx, sigma_qx_max=0.5,
         kappa_x=kappa_x, kappa_x_minfold=1, kappa_bc=None, kappa_r=0.0,
     )
@@ -91,7 +91,7 @@ def test_gibbs_sampler_learns_kappa_x_inner_outer_end_to_end():
     """
     config = _make_inversion_input(
         kappa_x="inner outer", nxout=2, nbc=0, sigma_qx=0.02,
-        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        sigma2_exc_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
     outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     kappa_x_trace = outputs[5]
@@ -109,29 +109,40 @@ def test_gibbs_sampler_supports_use_bc_false():
     """
     config = _make_inversion_input(
         kappa_x=0.3, nxout=0, sigma_qx=0.02, nbc=None,
-        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        sigma2_exc_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
     outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     xtrace = outputs[0]
     assert np.all(np.isfinite(xtrace))
 
 
-def test_gibbs_sampler_fixed_sigma_rep_does_not_require_sigma2_rep_prior():
+def test_gibbs_sampler_fixed_sigma_exc_does_not_require_sigma2_exc_prior():
     """
-    Bug regression: the guard deciding whether sigma2_rep_prior must be
+    Bug regression: the guard deciding whether sigma2_exc_prior must be
     parsed checks `sigma_qx_scheme != "fixed additive"` instead of
-    `sigma_rep_scheme != "fixed additive"`. sigma_qx_scheme can never equal
-    that string, so the guard is always True and a fixed numeric sigma_rep
-    still requires a (valid) sigma2_rep_prior/sigma_rep_max, contradicting
+    `sigma_exc_scheme != "fixed additive"`. sigma_qx_scheme can never equal
+    that string, so the guard is always True and a fixed numeric sigma_exc
+    still requires a (valid) sigma2_exc_prior/sigma_exc_max, contradicting
     the documented contract.
     """
     config = _make_inversion_input(
         kappa_x=0.3, nxout=0, sigma_qx=0.02, nbc=0,
-        sigma_rep=5.0, sigma2_rep_prior=None, sigma_rep_max=None,
+        sigma_exc=5.0, sigma2_exc_prior=None, sigma_exc_max=None,
     )
     outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     xtrace = outputs[0]
     assert np.all(np.isfinite(xtrace))
+
+
+def test_gibbs_sampler_sigma_exc_none_runs_with_zero_excess_error():
+    """sigma_exc=None (from an ini None/null) runs as a fixed sigma_exc of 0."""
+    config = _make_inversion_input(
+        kappa_x=0.3, nxout=0, sigma_qx=0.02, nbc=0,
+        sigma_exc=None, sigma2_exc_prior=None, sigma_exc_max=None,
+    )
+    outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
+    assert np.all(np.isfinite(outputs[0]))
+    assert np.all(outputs[3] == 0.0)
 
 
 def test_gibbs_sampler_supports_outer_basis_functions_with_fixed_kappa():
@@ -145,7 +156,7 @@ def test_gibbs_sampler_supports_outer_basis_functions_with_fixed_kappa():
     """
     config = _make_inversion_input(
         kappa_x=0.3, nxout=2, sigma_qx=0.02, nbc=0,
-        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        sigma2_exc_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
     outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     xtrace = outputs[0]
@@ -164,7 +175,7 @@ def test_gibbs_sampler_supports_sigma_qx_inner_outer_with_fixed_kappa():
     """
     config = _make_inversion_input(
         kappa_x=0.3, nxout=2, sigma_qx="inner outer", nbc=0,
-        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        sigma2_exc_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
     outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config)
     xtrace, sigma2_qx_trace = outputs[0], outputs[4]
@@ -205,11 +216,11 @@ def _make_inversion_input_with_timestamps(
         Hx_dic=Hx_dic, Hbc_dic={}, siteindicator_dic=siteindicator_dic,
         nperiod=nperiod, nbc=0, nxout=0, nr=nr, nbasis=nbasis,
         xprior=xprior, bcprior=None, rprior=rprior,
-        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        sigma2_exc_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
         sigma2_qx_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
         sigma_qbc=0.0, sigma_qr=0.1, kappa_x_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
         iterations=iterations, inner_group_id=None, ningroup=None,
-        sigma_rep=5.0, sigma_rep_max=100.0,
+        sigma_exc=5.0, sigma_exc_max=100.0,
         sigma_qx=0.02, sigma_qx_max=0.5,
         kappa_x=0.3, kappa_x_minfold=1, kappa_bc=None, kappa_r=0.0,
         tau_resid=tau_resid,
@@ -261,14 +272,14 @@ def test_gibbs_sampler_is_reproducible_when_given_an_explicit_rng():
     """
     # Builds on a combination already known to work (see
     # test_gibbs_sampler_supports_sigma_qx_inner_outer_with_fixed_kappa
-    # above), with sigma_rep also switched to sampled ('global additive')
+    # above), with sigma_exc also switched to sampled ('global additive')
     # so this test exercises two of the four slice samplers at once,
     # without introducing an untested scheme combination of its own --
     # this test is about reproducibility, not scheme coverage.
     config = _make_inversion_input(
         kappa_x=0.3, nxout=2, sigma_qx="inner outer", nbc=0,
-        sigma_rep="global additive",
-        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        sigma_exc="global additive",
+        sigma2_exc_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
 
     outputs_a = augmented_ffbs_mxkf_gibbs_multi_slice(config, rng=np.random.default_rng(2024))
@@ -294,7 +305,7 @@ def test_gibbs_sampler_analysis_forms_agree_end_to_end():
     """
     config = _make_inversion_input(
         kappa_x="inner outer", nxout=2, nbc=0, sigma_qx=0.02,
-        sigma2_rep_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+        sigma2_exc_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
     config_woodbury = dataclasses.replace(config, analysis_form="woodbury")
 

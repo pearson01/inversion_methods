@@ -113,7 +113,7 @@ def build_obs_vectors(fp_data, sites):
     for si, site in enumerate(sites):
 
         drop_vars = []
-        for var in ["H", "H_bc", "mf", "mf_error", "mf_variability", "mf_repeatability"]:
+        for var in ["H", "H_bc", "mf", "mf_error"]:
             if var in fp_data[site].data_vars:
                 drop_vars.append(var)
 
