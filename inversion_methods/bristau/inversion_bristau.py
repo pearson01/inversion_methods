@@ -535,7 +535,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
         # Update sigma2_exc
         # --------------------------------------------------------------
  
-        sigma2_exc_current = update_sigma2_exc(state_residuals, sigma_obs, sigma2_exc_aprior, sigma2_exc_bprior, sigma2_exc_max, sigma_exc_scheme, sigma2_exc_current, fixed_sigma2_exc, rng=rng)
+        sigma2_exc_current = update_sigma2_exc(state_residuals, sigma_obs, sigma2_exc_aprior, sigma2_exc_bprior, sigma2_exc_max, sigma_exc_scheme, sigma2_exc_current, fixed_sigma2_exc, tau_current, obs_prev_index_flat, obs_gap_flat, rng=rng)
 
         var_exc_trace[i] = sigma2_exc_current
 

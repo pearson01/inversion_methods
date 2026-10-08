@@ -4,6 +4,7 @@ import openghg_inversions.hbmcmc.inversionsetup as setup
 from openghg_inversions import utils
 from openghg_inversions.basis import basis_functions_wrapper
 from openghg_inversions.inversion_data import data_processing_surface_notracer
+from openghg_inversions.filters import filtering
 from inversion_methods.manipulation.lognormal_transformations import update_log_normal_prior, covariance_lognormal_transform
 from dataclasses import dataclass
 
@@ -49,6 +50,7 @@ class DataConfig:
     fix_basis_outer_regions: bool = False
     basis_output_path: str | None = None
     bc_freq: str | None = None
+    filters: dict | list | None = None
 
 
 
@@ -212,9 +214,32 @@ def check_finite_inputs(arrays):
             raise ValueError(f"{name} contains {n_bad} non-finite values after filtering.")
 
 
+def apply_filters(fp_all, sites, filters):
+    # Same approach as RHIME preparation: apply openghg_inversions filters,
+    # then drop any site left with no observations.
+    if not filters:
+        return fp_all, sites
+
+    try:
+        fp_all = filtering(fp_all, filters)
+    except ValueError:
+        for site in sites:
+            fp_all[site] = fp_all[site].compute()
+        fp_all = filtering(fp_all, filters)
+
+    empty = [site for site in sites if fp_all[site].sizes.get("time", 0) == 0]
+    for site in empty:
+        del fp_all[site]
+    if empty:
+        print(f"WARNING: no observations left after filtering for sites: {empty}", flush=True)
+
+    return fp_all, [site for site in sites if site not in empty]
+
+
 def extract_data(config: DataConfig):
     # sites with no obs/footprints are dropped by data_processing_surface_notracer
     fp_all, sites, _, _, _, _ = extract_observation_data(config)
+    fp_all, sites = apply_filters(fp_all, sites, config.filters)
     fp_data = build_basis_functions(fp_all, config)
 
     for site in sites:

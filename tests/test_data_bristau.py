@@ -222,7 +222,7 @@ def _stub_extract(monkeypatch, fp_all, returned_sites):
 
 
 def _config(sites, use_bc=True):
-    return SimpleNamespace(sites=sites, domain="EUROPE", use_bc=use_bc, xprior={}, rprior={}, bcprior={})
+    return SimpleNamespace(sites=sites, domain="EUROPE", use_bc=use_bc, xprior={}, rprior={}, bcprior={}, filters=None)
 
 
 def test_extract_data_uses_sites_returned_by_data_processing(monkeypatch, capsys):

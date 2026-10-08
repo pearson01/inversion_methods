@@ -59,6 +59,7 @@ class InversionParameters:
     country_unit_prefix: str = "T"
     basis_output_path: str | None = None
     bc_freq: str | None = None
+    filters: dict | list | None = None
     sigma_exc: str | float | None = 'global additive'
     sigma_exc_max: float | None = 100.0
     sigma_qx: str | float = "inner outer"
@@ -153,6 +154,7 @@ def bristau_function(config: InversionParameters):
                              bcprior=config.bcprior,
                              rprior=config.rprior,
                              bc_freq=config.bc_freq,
+                             filters=config.filters,
                             )
     (
     Hx, 

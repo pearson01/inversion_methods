@@ -68,6 +68,9 @@ def update_sigma2_exc(state_residuals,
                    sigma_exc_scheme,
                    sigma2_exc_current,
                    fixed_sigma2_exc,
+                   tau,
+                   prev_index_flat,
+                   gap_flat,
                    rng=None,
                    ):
 
@@ -77,17 +80,27 @@ def update_sigma2_exc(state_residuals,
 
     elif sigma_exc_scheme == "global additive":
 
-        sigma2_exc_sample = sample_sigma2_exc(sigma2_exc_current, state_residuals**2, sigma_obs, sigma2_exc_aprior, sigma2_exc_bprior, sigma2_exc_max, rng=rng)
+        sigma2_exc_sample = sample_sigma2_exc(sigma2_exc_current, state_residuals, sigma_obs, sigma2_exc_aprior, sigma2_exc_bprior, sigma2_exc_max, tau, prev_index_flat, gap_flat, rng=rng)
 
     return sigma2_exc_sample
 
 
-def sigma2_exc_log_posterior(s_current, r2, sigma_obs, alpha_prior, beta_prior, sigma2_exc_max):
+def sigma2_exc_log_posterior(s_current, r, sigma_obs, alpha_prior, beta_prior, sigma2_exc_max, tau, prev_index_flat, gap_flat):
     """
     Log posterior for sigma2_exc under a scaled Beta prior.
 
     Likelihood:
-        residuals ~ N(0, sigma_obs**2 + sigma2_exc)
+        residuals ~ N(0, sigma_obs**2 + sigma2_exc) marginally, with the
+        AR(1)/OU same-site correlation phi(gap) = exp(-gap / tau) used by
+        tau_resid.whiten_observations(). Factorising the joint density over
+        each observation's preceding same-site residual, with standardised
+        residuals u = r / sqrt(err_var):
+
+            u_i | u_prev ~ N(phi_i * u_prev, 1 - phi_i**2)
+
+        The log(1 - phi_i**2) term doesn't depend on sigma2_exc, so it is
+        dropped. tau <= 0 sets phi = 0 everywhere, recovering the iid
+        likelihood exactly.
 
     Prior:
         sigma2_exc / sigma2_exc_max ~ Beta(alpha_prior, beta_prior)
@@ -96,8 +109,8 @@ def sigma2_exc_log_posterior(s_current, r2, sigma_obs, alpha_prior, beta_prior, 
     ----------
     s_current : float
         Current value of log(sigma2_exc).
-    r2 : array-like
-        Squared residuals.
+    r : array-like
+        Residuals (signed, not squared), in the flat order of prev_index_flat.
     sigma_obs : float or array-like
         Stated observation uncertainty (standard deviation).
     alpha_prior : float
@@ -106,9 +119,13 @@ def sigma2_exc_log_posterior(s_current, r2, sigma_obs, alpha_prior, beta_prior, 
         Beta shape parameter of the Beta prior.
     sigma2_exc_max : float
         Upper bound for sigma2_exc.
-    include_prior_constant : bool
-        Whether to include the normalising constant of the scaled Beta prior.
-        Usually unnecessary for MCMC if constants cancel.
+    tau : float
+        Current residual correlation length (hours). tau <= 0 means iid.
+    prev_index_flat : np.ndarray of int
+        Flat index of each observation's preceding same-site observation,
+        or -1 if none (from tau_resid.prepare_tau_resid_indexing).
+    gap_flat : np.ndarray
+        Time gap in hours to that preceding observation.
 
     Returns
     -------
@@ -138,8 +155,23 @@ def sigma2_exc_log_posterior(s_current, r2, sigma_obs, alpha_prior, beta_prior, 
         )
         return -np.inf
 
+    err = np.broadcast_to(err, np.shape(r))
+    u = r / np.sqrt(err)
+
+    if tau is None or tau <= 0:
+        innovation = u
+        variance = 1.0
+    else:
+        has_prev = prev_index_flat >= 0
+        phi = np.where(has_prev, np.exp(-gap_flat / tau), 0.0)
+        # Match whiten_observations(), which flushes these to zero.
+        phi[phi < np.finfo(float).eps] = 0.0
+        u_prev = np.where(has_prev, u[np.maximum(prev_index_flat, 0)], 0.0)
+        innovation = u - phi * u_prev
+        variance = 1.0 - phi**2
+
     # Gaussian log likelihood, dropping constants
-    loglik = -0.5 * np.sum(np.log(err) + r2 / err)
+    loglik = -0.5 * np.sum(np.log(err) + innovation**2 / variance)
 
     # Rescale sigma2_exc to the unit interval
     z = sigma2_exc / sigma2_exc_max
@@ -153,11 +185,15 @@ def sigma2_exc_log_posterior(s_current, r2, sigma_obs, alpha_prior, beta_prior, 
 
 
 
-def sample_sigma2_exc(sigma2_exc_current, r2, sigma_obs, alpha_prior, beta_prior, sigma2_exc_max, w=1.0, m=100, rng=None):
+def sample_sigma2_exc(sigma2_exc_current, r, sigma_obs, alpha_prior, beta_prior, sigma2_exc_max, tau, prev_index_flat, gap_flat, w=1.0, m=100, rng=None):
 
     """
     Slice sampler generating samples from the posterior of sigma2_exc. Slice sampler required as conjugacy broken as sigma2_exc appears as a component of the sum
     of the likelihood denominator - no closed form.
+
+    r must be the signed residuals, not their squares: the AR(1) innovation
+    depends on the sign of the preceding same-site residual. See
+    sigma2_exc_log_posterior for tau, prev_index_flat and gap_flat.
 
     rng : numpy.random.Generator, optional
         Source of randomness for this draw. If not supplied (the default),
@@ -178,7 +214,7 @@ def sample_sigma2_exc(sigma2_exc_current, r2, sigma_obs, alpha_prior, beta_prior
         raise ValueError("Current sigma2_exc has non-finite log posterior")
 
 
-    logp = lambda s: sigma2_exc_log_posterior(s, r2, sigma_obs, alpha_prior, beta_prior, sigma2_exc_max)
+    logp = lambda s: sigma2_exc_log_posterior(s, r, sigma_obs, alpha_prior, beta_prior, sigma2_exc_max, tau, prev_index_flat, gap_flat)
 
     logy = logp(s_current) - rng.exponential(1)
 
