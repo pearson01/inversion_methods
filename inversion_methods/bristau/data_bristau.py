@@ -104,23 +104,73 @@ def build_basis_functions(fp_all, config: DataConfig):
     )
 
 
-def build_obs_vectors(fp_data, sites):
+def finite_time_mask(ds, var_names):
+    """
+    Boolean mask over `time` that is True where every listed variable is finite
+    (not NaN or +/-inf) across all of its non-time dimensions. Also requires
+    mf_error > 0.
 
+    Returns the mask and a dict of the number of time steps failing each check.
+    """
+    keep = np.ones(ds.sizes["time"], dtype=bool)
+    n_bad = {}
+
+    for var in var_names:
+        if var not in ds.data_vars:
+            continue
+        da = ds[var]
+        other_dims = [d for d in da.dims if d != "time"]
+        finite = np.isfinite(da)
+        if other_dims:
+            finite = finite.all(dim=other_dims)
+        finite = np.asarray(finite.transpose("time").values, dtype=bool)
+        n_bad[var] = int((~finite).sum())
+        keep &= finite
+
+    if "mf_error" in ds.data_vars:
+        positive = np.asarray(ds["mf_error"].values > 0, dtype=bool)
+        n_bad["mf_error<=0"] = int((~positive & np.isfinite(ds["mf_error"].values)).sum())
+        keep &= positive
+
+    return keep, n_bad
+
+
+def build_obs_vectors(fp_data, sites):
+    """
+    Drop time steps with non-finite H, H_bc, mf or mf_error (or mf_error <= 0) from
+    each site, writing the filtered dataset back into fp_data so that H_bc extracted
+    later stays aligned. Sites left with no valid time steps are removed.
+
+    Returns Hx, Y, Ytime, error, siteindicator and the list of retained sites.
+    """
     error = np.zeros(0)
     Y = np.zeros(0)
     siteindicator = np.zeros(0)
+    Ytime = None
+    Hx = None
+    kept_sites = []
 
-    for si, site in enumerate(sites):
+    for site in sites:
 
-        drop_vars = []
-        for var in ["H", "H_bc", "mf", "mf_error"]:
-            if var in fp_data[site].data_vars:
-                drop_vars.append(var)
+        keep, n_bad = finite_time_mask(fp_data[site], ["H", "H_bc", "mf", "mf_error"])
+        n_drop = int((~keep).sum())
 
-        fp_data[site] = fp_data[site].dropna("time", subset=drop_vars)
+        if n_drop > 0:
+            details = ", ".join(f"{var}: {n}" for var, n in n_bad.items() if n > 0)
+            print(f"{site}: dropping {n_drop} of {keep.size} time steps with invalid values ({details})", flush=True)
+
+        fp_data[site] = fp_data[site].isel(time=np.flatnonzero(keep))
+
+        if fp_data[site].sizes["time"] == 0:
+            print(f"WARNING: {site} has no valid time steps remaining; removing it from the inversion.", flush=True)
+            fp_data.pop(site)
+            continue
+
+        si = len(kept_sites)
+        kept_sites.append(site)
 
         error = np.concatenate((error, fp_data[site].mf_error.values))
-        
+
         Y = np.concatenate((Y, fp_data[site].mf.values))
         siteindicator = np.concatenate((siteindicator, np.ones_like(fp_data[site].mf.values) * si))
 
@@ -131,7 +181,10 @@ def build_obs_vectors(fp_data, sites):
 
         Hx = fp_data[site].H.values if si == 0 else np.hstack((Hx, fp_data[site].H.values))
 
-    return Hx, Y, Ytime, error, siteindicator
+    if not kept_sites:
+        raise ValueError("No sites have any valid (finite) observations/sensitivities remaining.")
+
+    return Hx, Y, Ytime, error, siteindicator, kept_sites
 
 
 def build_boundary_conditions(fp_data, sites, config: DataConfig):
@@ -147,28 +200,45 @@ def build_boundary_conditions(fp_data, sites, config: DataConfig):
             Hbc = Hmbc if si == 0 else np.hstack((Hbc, Hmbc))
 
         return Hbc
-    
+
+
+def check_finite_inputs(arrays):
+    """Raise if any of the named arrays (None entries skipped) contain non-finite values."""
+    for name, arr in arrays.items():
+        if arr is None:
+            continue
+        n_bad = int(np.size(arr) - np.isfinite(arr).sum())
+        if n_bad > 0:
+            raise ValueError(f"{name} contains {n_bad} non-finite values after filtering.")
+
 
 def extract_data(config: DataConfig):
-    fp_all, _, _, _, _, _ = extract_observation_data(config)
+    # sites with no obs/footprints are dropped by data_processing_surface_notracer
+    fp_all, sites, _, _, _, _ = extract_observation_data(config)
     fp_data = build_basis_functions(fp_all, config)
 
-    for site in config.sites:
+    for site in sites:
         fp_data[site].attrs["Domain"] = config.domain
 
-    Hx, Y, Ytime, error, siteindicator = build_obs_vectors(fp_data, config.sites)
+    Hx, Y, Ytime, error, siteindicator, sites = build_obs_vectors(fp_data, sites)
     nbasis = Hx.shape[0]
+
+    dropped = [site for site in config.sites if site.upper() not in sites]
+    if dropped:
+        print(f"WARNING: sites dropped from the inversion: {dropped}", flush=True)
 
     update_log_normal_prior(config.xprior)
     update_log_normal_prior(config.rprior)
 
     if config.use_bc:
         update_log_normal_prior(config.bcprior)
-        Hbc = build_boundary_conditions(fp_data, config.sites, config)
+        Hbc = build_boundary_conditions(fp_data, sites, config)
     else:
         Hbc = None
 
-    return Hx, Y, Ytime, error, siteindicator, nbasis, config.xprior, config.bcprior, Hbc, fp_data
+    check_finite_inputs({"Hx": Hx, "Y": Y, "error": error, "Hbc": Hbc})
+
+    return Hx, Y, Ytime, error, siteindicator, nbasis, config.xprior, config.bcprior, Hbc, fp_data, sites
 
 
 def inner_basis_country_groups(bfds, cntryds, nxout, nbasis, min_group_size=5):

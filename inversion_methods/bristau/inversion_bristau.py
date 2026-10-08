@@ -54,6 +54,7 @@ class InversionInput:
     sigma_qr: float | None = None
     kappa_x_prior: dict | None = None
     iterations: int | None = 2500
+    burn: int | None = None
     inner_group_id: np.ndarray | None = None
     ningroup: int | None = None
     sigma_exc: str | float | None = 'global additive'
@@ -263,10 +264,16 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
     # Configuration and validation
     # ------------------------------------------------------------------
 
-    if config.iterations > 1000:
-        burn = 500
+    if config.burn is None:
+        if config.iterations > 1000:
+            burn = 500
+        else:
+            burn = int(0.2 * config.iterations)
     else:
-        burn = int(0.2 * config.iterations)
+        burn = int(config.burn)
+
+        if burn < 0 or burn >= config.iterations:
+            raise ValueError(f"burn must be between 0 and iterations - 1 ({config.iterations - 1}); received {config.burn}.")
 
     nxout = config.nxout
     nxin = config.nbasis - nxout
@@ -329,10 +336,13 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
     if kappa_x_scheme != "fixed":
         kappa_x_aprior, kappa_x_bprior = prior_parser(config.kappa_x_prior)
         kappa_x_max = kappa_max(config.nperiod, config.kappa_x_minfold)
+        initial_kappa_x = min(0.8, kappa_x_max)
+
     else:
         kappa_x_aprior = None
         kappa_x_bprior = None
         kappa_x_max = None
+        initial_kappa_x = fixed_kappa_x
 
     rprior_sigma2 = rprior_sigma**2
     rprior_sigma2s = np.full(2, rprior_sigma2, dtype=float,)
@@ -396,15 +406,13 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
     initial_sigma2_exc = 400.0
 
     sigma2_exc_current = initialise_sigma2_exc(sigma_exc_scheme, fixed_sigma2_exc, initial_sigma2_exc)
-    initial_sigma2_qx = 0.02
+    initial_sigma2_qx = 0.4
 
     sigma2_qx_bf_current = initialise_sigma2_qx_vector(sigma_qx_scheme, fixed_sigma2_qx, initial_sigma2_qx, config.nbasis, config.nxout, nxin, ningroup, inner_group_id)
 
     sigma2_qr = config.sigma_qr**2
 
     sigma2_qrs = np.full(config.nr, sigma2_qr, dtype=float,)
-
-    initial_kappa_x = 0.5
 
     kappa_x_vector_current = initialise_kappa_x_vector(kappa_x_scheme, fixed_kappa_x, initial_kappa_x, n_kappa_x_parameters)
 
@@ -665,6 +673,98 @@ class PostProcessInput:
     convergence_report: dict | None = None
 
 
+def select_period_flux(flux_da: xr.DataArray, period_starts) -> np.ndarray:
+    """
+    Prior flux for each inversion period, returned with shape (lat, lon, nperiod).
+
+    If the flux has a time coordinate that starts on or before the first period,
+    each period uses the latest flux time step at or before the period start
+    (so monthly, annual and multi-year flux files are all matched by date).
+    A single time step is used for every period. A 12 step flux that does not
+    cover the first period is treated as a calendar-month climatology.
+    """
+    if "time" not in flux_da.dims:
+        flux_da = flux_da.expand_dims(time=1)
+    flux_da = flux_da.transpose("lat", "lon", "time")
+    ntime = flux_da.sizes["time"]
+    period_starts = to_datetime(period_starts)
+
+    if ntime == 1:
+        print("\nOnly one flux time step found, using it for every period.")
+        return np.repeat(flux_da.values, len(period_starts), axis=-1)
+
+    flux_times = to_datetime(flux_da.time.values)
+
+    if flux_times.min() <= period_starts[0]:
+        selected = flux_da.sel(time=period_starts, method="ffill")
+        stale = (period_starts - to_datetime(selected.time.values)).days > 366
+        if stale.any():
+            print(f"\nWarning: {stale.sum()} periods use a flux time step more than a year "
+                  f"older than the period start (latest flux time {flux_times.max():%Y-%m-%d}).")
+        return selected.values
+
+    if ntime == 12:
+        print("\nFlux does not cover the inversion start, treating its 12 time steps as a calendar-month climatology.")
+        return flux_da.values[:, :, period_starts.month - 1]
+
+    raise ValueError(
+        f"Flux time steps ({flux_times.min():%Y-%m-%d} to {flux_times.max():%Y-%m-%d}) do not cover "
+        f"the inversion start {period_starts[0]:%Y-%m-%d}."
+    )
+
+
+def country_totals(xtrace, apriori_flux, bfarray, cntrygrid, ncountry, area, molarmass, unit_factor):
+    """
+    Posterior median, 68% and 95% HDI, and prior (x = 1) emission totals for each
+    country and period.
+
+    Args:
+      xtrace: (steps, nperiod, nbasis) scaling factor trace.
+      apriori_flux: (lat, lon, nperiod) prior flux in mol/m2/s.
+      bfarray: (lat, lon) zero-based basis function index of each grid cell.
+      cntrygrid: (lat, lon) country index of each grid cell.
+      ncountry: number of countries in the country file.
+      area: (lat, lon) grid cell areas in m2.
+      molarmass: molar mass of the species in g/mol.
+      unit_factor: divisor converting g/yr to the output country units.
+
+    Returns:
+      cntrymedian (ncountry, nperiod), cntry68 (ncountry, 2, nperiod),
+      cntry95 (ncountry, 2, nperiod), cntryprior (ncountry, nperiod).
+    """
+    steps, nperiod, _ = xtrace.shape
+    nbf = int(np.max(bfarray)) + 1
+
+    cntrymedian = np.zeros((ncountry, nperiod))
+    cntry68 = np.zeros((ncountry, 2, nperiod))
+    cntry95 = np.zeros((ncountry, 2, nperiod))
+    cntryprior = np.zeros((ncountry, nperiod))
+
+    # Each grid cell contributes to one (country, basis function) pair, so the
+    # weights for all pairs can be summed in a single bincount per period
+    valid = (cntrygrid >= 0) & (cntrygrid < ncountry) & (bfarray >= 0)
+    pair_index = (cntrygrid[valid].astype(int) * nbf + bfarray[valid].astype(int))
+    to_country_units = area[valid] * 3600 * 24 * 365 * molarmass / unit_factor
+
+    for period in np.arange(nperiod):
+        weights = np.bincount(
+            pair_index,
+            weights=apriori_flux[:, :, period][valid] * to_country_units,
+            minlength=ncountry * nbf,
+        ).reshape(ncountry, nbf)
+
+        cntrytottraces = xtrace[:, period, :nbf] @ weights.T
+        cntryprior[:, period] = weights.sum(axis=1)
+
+        for ci in range(ncountry):
+            cntrytottrace = cntrytottraces[:, ci]
+            cntrymedian[ci, period] = np.median(cntrytottrace, axis=0)
+            cntry68[ci, :, period] = az.hdi(cntrytottrace, 0.68)
+            cntry95[ci, :, period] = az.hdi(cntrytottrace, 0.95)
+
+    return cntrymedian, cntry68, cntry95, cntryprior
+
+
 def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     r"""Takes the output from inferpymc function, along with some other input
     information, calculates statistics on them and places it all in a dataset.
@@ -813,27 +913,10 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     scalemap = np.stack(scalemap, axis=-1)
 
     emds = config.fp_data[".flux"][config.emissions_name[0]]
-    flux_array_all = emds.data.flux.values
-
-    # HACK: assume that smallest flux dim is time, then re-order flux so that
-    # time is the last coordinate
-    flux_dim_shape = flux_array_all.shape
-    flux_dim_positions = range(len(flux_dim_shape))
-    smallest_dim_position = min(list(zip(flux_dim_positions, flux_dim_shape)), key=(lambda x: x[1]))[0]
-
-    flux_array_all = np.moveaxis(flux_array_all, smallest_dim_position, -1)
-    # end HACK
 
     allmonth = date_range(config.start_date, config.end_date, freq="MS")[:-1]
 
-    apriori_flux = np.zeros((*flux_array_all.shape[:2], config.nperiod))
-    if flux_array_all.shape[2] == 1:
-        print("\nAssuming flux prior is annual and using it for every period.")
-        apriori_flux[:, :, :] = flux_array_all[:, :, [0]]
-    else:
-        print("\nAssuming flux prior is a calendar-month climatology.")
-        for period, timestamp in enumerate(allmonth):
-            apriori_flux[:, :, period] = flux_array_all[:, :, timestamp.month - 1]
+    apriori_flux = select_period_flux(emds.data.flux, allmonth)
 
     flux = np.zeros_like(scalemap)
     for period in np.arange(config.nperiod):
@@ -856,11 +939,6 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     molarmass = convert.molar_mass(config.species)
     unit_factor = convert.prefix(config.country_unit_prefix)
 
-    cntrymedian = np.zeros((len(cntrynames), config.nperiod))
-    cntry68 = np.zeros((len(cntrynames), len(nui), config.nperiod))
-    cntry95 = np.zeros((len(cntrynames), len(nui), config.nperiod))
-    cntryprior = np.zeros((len(cntrynames), config.nperiod))
-
     if config.country_unit_prefix is None:
         config.country_unit_prefix = ""
     country_units = config.country_unit_prefix + "g"
@@ -869,28 +947,10 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
 
     steps= len(config.var_exc_trace)
 
-    for period in np.arange(config.nperiod):
-        apriori_flux_period = apriori_flux[:,:,period]
-        for ci, cntry in enumerate(cntrynames):
-            cntrytottrace = np.zeros(steps)
-            cntrytotprior = 0
-            for bf in range(int(np.max(bfarray)) + 1):
-                bothinds = np.logical_and(cntrygrid == ci, bfarray == bf)
+    cntrymedian, cntry68, cntry95, cntryprior = country_totals(
+        config.xtrace, apriori_flux, bfarray, cntrygrid, len(cntrynames), area, molarmass, unit_factor
+    )
 
-                weight_bf = (
-                np.sum(area[bothinds].ravel() * apriori_flux_period[bothinds].ravel() * 3600 * 24 * 365 * molarmass)
-                / unit_factor
-                )
-
-                cntrytottrace += weight_bf * config.xtrace[:, period, bf]
-                cntrytotprior += weight_bf
-            
-            cntrymedian[ci, period] = np.median(cntrytottrace, axis=0)
-            cntry68[ci, :, period] = az.hdi(cntrytottrace, 0.68)
-            cntry95[ci, :, period] = az.hdi(cntrytottrace, 0.95)
-
-            cntryprior[ci, period] = cntrytotprior
-            
     Ymod = np.concatenate(list(Ymod_dic.values()))
 
     all_group_id = build_group_id_coordinate(config.nxout, config.nbasis, config.inner_group_id)

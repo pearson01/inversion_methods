@@ -33,6 +33,7 @@ class InversionParameters:
     sigma_qr: float    
     kappa_x_prior: dict         
     iterations: int = 2500
+    burn: int | None = None
     nxout: int = 6
     platform: list[str | None] | str | None = None
     met_model: list | None = None
@@ -162,9 +163,13 @@ def bristau_function(config: InversionParameters):
     nbasis, 
     xprior, 
     bcprior, 
-    Hbc, 
-    fp_data
+    Hbc,
+    fp_data,
+    sites,
     ) = extract_data(data_config)
+
+    # sites may have been dropped during data extraction/filtering
+    config = replace(config, sites=sites)
 
     cntryds = build_cntryds(config.domain, config.country_file)
     
@@ -196,6 +201,7 @@ def bristau_function(config: InversionParameters):
         sigma_qr=config.sigma_qr,
         kappa_x_prior=config.kappa_x_prior,
         iterations=config.iterations,
+        burn=config.burn,
         inner_group_id=inner_group_id,
         ningroup=ningroup,
         sigma_exc=config.sigma_exc,
