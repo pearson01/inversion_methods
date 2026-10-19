@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from inversion_methods.bristau.sigma_exc import update_sigma2_exc, sigma_exc_scheme_select, initialise_sigma2_exc
 from inversion_methods.bristau.siqma_qx import update_sigma2_qx, sigma_qx_scheme_select, initialise_sigma2_qx_vector, sigma_qx_trace_params, build_group_id_coordinate
-from inversion_methods.bristau.kappa_x import update_kappa_x, kappa_x_scheme_select, initialise_kappa_x_vector, kappa_x_trace_params, kappa_max
+from inversion_methods.bristau.kappa_x import update_kappa_x, update_kappa_x_marginal, kappa_x_scheme_select, initialise_kappa_x_vector, kappa_x_trace_params, kappa_max
 from inversion_methods.bristau.bristau_filter_sampler import iterative_augmented_mxkf, augmented_backward_sampler, amxkf_inputs
 from inversion_methods.bristau.tau_resid import tau_scheme_select, tau_trace_params, initialise_tau, update_tau_resid, prepare_tau_resid_indexing, whiten_observations, prepare_tau_sampler_inputs, sample_tau
 
@@ -65,6 +65,7 @@ class InversionInput:
     kappa_x_minfold: int | None = 1
     kappa_bc: None = None
     kappa_r: float | None = 0.0
+    joint_kappa_sigma_qx: bool = True
     tau_resid: str | float | None = 0.0
     tau_resid_prior: dict | None = None
     tau_resid_max: float | None = 200
@@ -326,7 +327,8 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
 
     if sigma_qx_scheme != "fixed":
         sigma2_qx_aprior, sigma2_qx_bprior = prior_parser(config.sigma2_qx_prior)
-        sigma2_qx_max=config.sigma_qx_max**2
+        # sigma_qx_max=None means no upper truncation of the inverse-gamma conditional.
+        sigma2_qx_max = np.inf if config.sigma_qx_max is None else config.sigma_qx_max**2
     else:
         sigma2_qx_aprior = None
         sigma2_qx_bprior = None
@@ -343,6 +345,9 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
         kappa_x_bprior = None
         kappa_x_max = None
         initial_kappa_x = fixed_kappa_x
+
+    # Joint (kappa_x, sigma2_qx) update: only meaningful when both are sampled.
+    joint_kappa_sigma_qx = (config.joint_kappa_sigma_qx and kappa_x_scheme != "fixed" and sigma_qx_scheme != "fixed")
 
     rprior_sigma2 = rprior_sigma**2
     rprior_sigma2s = np.full(2, rprior_sigma2, dtype=float,)
@@ -503,6 +508,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
             nr=config.nr,
             nxout=nxout,
             iteration=i,
+            kappa_r=config.kappa_r,
             za_mu_warmstart=za_mu_prev,
             err_var_dic=err_var_dic,
             Y_dic_raw=config.Y_dic,
@@ -560,6 +566,33 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
 
 
         # --------------------------------------------------------------
+        # Update kappa (joint with sigma2_qx)
+        # --------------------------------------------------------------
+        # kappa_x is drawn from its marginal with sigma2_qx integrated out;
+        # the sigma2_qx draw below then conditions on this new kappa_x, so
+        # together they are a joint draw from p(kappa_x, sigma2_qx | x, r).
+
+        if joint_kappa_sigma_qx:
+            kappa_x_vector_current = update_kappa_x_marginal(zmusample,
+                                                             zmusample_out,
+                                                             zmusample_in,
+                                                             config.nbasis,
+                                                             nxout,
+                                                             nxin,
+                                                             kappa_x_aprior,
+                                                             kappa_x_bprior,
+                                                             kappa_x_max,
+                                                             kappa_x_scheme,
+                                                             kappa_x_vector_current,
+                                                             sigma2_qx_aprior,
+                                                             sigma2_qx_bprior,
+                                                             sigma2_qx_max,
+                                                             sigma_qx_scheme,
+                                                             inner_group_id,
+                                                             ningroup,
+                                                             rng=rng,)
+
+        # --------------------------------------------------------------
         # Update sigma2_qx
         # --------------------------------------------------------------
 
@@ -584,22 +617,23 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
                              )
 
         # --------------------------------------------------------------
-        # Update kappa
+        # Update kappa (conditional on sigma2_qx)
         # --------------------------------------------------------------
 
-        kappa_x_vector_current = update_kappa_x(zmusample, 
-                                          zmusample_out, 
-                                          zmusample_in, 
-                                          sigma2_qx_bf_current, 
-                                          kappa_x_aprior, 
-                                          kappa_x_bprior, 
-                                          nxout,
-                                          nxin, 
-                                          kappa_x_max, 
-                                          kappa_x_scheme,
-                                          kappa_x_vector_current,
-                                          fixed_kappa_x,
-                                          rng=rng,)
+        if not joint_kappa_sigma_qx:
+            kappa_x_vector_current = update_kappa_x(zmusample, 
+                                                    zmusample_out, 
+                                                    zmusample_in, 
+                                                    sigma2_qx_bf_current, 
+                                                    kappa_x_aprior, 
+                                                    kappa_x_bprior, 
+                                                    nxout,
+                                                    nxin, 
+                                                    kappa_x_max, 
+                                                    kappa_x_scheme,
+                                                    kappa_x_vector_current,
+                                                    fixed_kappa_x,
+                                                    rng=rng,)
 
         kappa_x_trace[i] = kappa_x_vector_current
 

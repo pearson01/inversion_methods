@@ -68,6 +68,7 @@ class InversionParameters:
     kappa_x_minfold: int | None = 1
     kappa_bc: None = None
     kappa_r: float | None = 0.0
+    joint_kappa_sigma_qx: bool = True
     min_group_size: int | None = 15
     tau_resid: str | float | None = 0.0
     tau_resid_prior: dict | None = None
@@ -213,7 +214,8 @@ def bristau_function(config: InversionParameters):
         kappa_x=config.kappa_x,
         kappa_x_minfold=config.kappa_x_minfold,
         kappa_bc=config.kappa_bc,
-        kappa_r=config.kappa_r,
+        kappa_r=1.0 if config.kappa_r is None else config.kappa_r,  # None -> random walk in r
+        joint_kappa_sigma_qx=config.joint_kappa_sigma_qx,
         nxout=config.nxout,
         tau_resid=config.tau_resid,
         tau_resid_prior=config.tau_resid_prior,

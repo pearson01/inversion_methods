@@ -611,7 +611,8 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
                          xprior=config.xprior,
                          bcprior=config.bcprior,
                          rprior=config.rprior,
-                         nr=config.nr
+                         nr=config.nr,
+                         kappa_r=config.kappa_r,
                          )
 
 

@@ -259,6 +259,28 @@ def test_sample_sigma2_qx_returns_a_bounded_scalar():
     assert all(0 < d <= 0.3 for d in draws)
 
 
+def test_sample_sigma2_qx_with_infinite_max_is_untruncated_inverse_gamma():
+    """
+    sigma_qx_max=None in the config is mapped to sigma2_qx_max=np.inf, which
+    must reduce the truncated sampler to a plain inverse-gamma draw.
+    """
+    from scipy.stats import invgamma
+
+    zmusample = _zmusample_with_reference(100, 5, seed=4)
+    alpha, beta, kappa, nbasis = 2.0, 0.01, 0.5, 5
+
+    x_pred = kappa * zmusample[:-1, :nbasis] + (1 - kappa) * zmusample[:-1, -1][:, None]
+    x_innov = zmusample[1:, :nbasis] - x_pred
+    shape = alpha + 0.5 * x_innov.size
+    scale = beta + 0.5 * np.sum(x_innov**2)
+
+    draw = sample_sigma2_qx(zmusample, kappa_x=kappa, alpha_prior=alpha, beta_prior=beta, nbasis=nbasis, sigma2_qx_max=np.inf, rng=np.random.default_rng(1))
+    expected = invgamma.ppf(np.random.default_rng(1).uniform(0, 1), a=shape, scale=scale)
+
+    assert np.isfinite(draw)
+    assert draw == pytest.approx(expected)
+
+
 def test_sample_sigma2_qx_grouped_broadcasts_and_matches_group_values():
     group_id = np.array([0, 0, 1, 1, 1])
     zmusample_in = _zmusample_with_reference(60, len(group_id), seed=5)

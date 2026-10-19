@@ -139,7 +139,8 @@ months, `state_residuals`):
   month to month. Depending on `sigma_qx` this can be a single global value, separate
   inner/outer values, or separate values per country group (`sigma_qx_groups`, which assigns each
   inner basis function to a country using a land-country mask, merging countries with fewer than
-  `min_group_size` basis functions into an "other" group), each capped at `sigma_qx_max**2`.
+  `min_group_size` basis functions into an "other" group), each capped at `sigma_qx_max**2`
+  (set `sigma_qx_max = None` to remove the cap and sample from the untruncated inverse-gamma).
 - `update_kappa_x` ([kappa_x.py](inversion_methods/bristau/kappa_x.py)) - the persistence
   parameter(s) `kappa_out`/`kappa_in` (or a single global value), sampled subject to an upper
   bound `kappa_max(nperiod, kappa_x_minfold)` that prevents excessive persistence over short
