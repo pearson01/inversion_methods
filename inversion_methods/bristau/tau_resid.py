@@ -23,6 +23,15 @@ the accompanying variance normalisation that completes the whitening is
 applied implicitly downstream, via err_var_inv, by the existing diagonal-R
 Kalman-gain machinery.
 
+The correlation is modelled within each period only. The first observation
+at each site in a period would otherwise be decorrelated against an
+observation from an earlier period, which depends on that period's state.
+With tau > 0 these observations are conditioned on rather than modelled:
+whiten_observations() gives them infinite variance and
+sigma_exc.sigma2_exc_log_posterior() leaves them out, so every factor of the
+likelihood involves a single period's state. Later observations in the
+period are still decorrelated against them.
+
 `tau_resid = 0.0` (the default) disables this entirely: phi is 0
 everywhere, whiten_observations() returns Y/Hz unchanged and err_var exactly
 as computed before this module existed.
@@ -97,16 +106,16 @@ def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigm
     -------
     prev_Y_dic, prev_H_dic : dict[int, np.ndarray]
         Per period: the raw Y value / Hz row of the preceding same-site
-        observation (which may sit in an earlier period). Zero where no
-        preceding observation exists (that observation is the first of its
-        site in the whole run).
+        observation in the same period. Zero where no preceding observation
+        exists (that observation is the first of its site in the period).
     prev_sigma_obs_dic : dict[int, np.ndarray]
         Per period: sigma_obs of that preceding same-site observation. Zero
         where no preceding observation exists.
     gap_dic : dict[int, np.ndarray]
         Per period: the time gap in hours to that preceding observation.
     has_prev_dic : dict[int, np.ndarray of bool]
-        Per period: whether a preceding same-site observation exists.
+        Per period: whether a preceding same-site observation exists in the
+        same period.
     gap_flat : np.ndarray
         Per-observation gap, in the flat order
         np.concatenate([Y_dic[t] for t in range(nperiod)]) -- the same order
@@ -118,10 +127,12 @@ def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigm
     prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic = {}, {}, {}, {}, {}
     gap_flat_parts, prev_index_flat_parts = [], []
 
-    last_time, last_Y, last_H, last_sigma_obs, last_flat_index = {}, {}, {}, {}, {}
     flat_offset = 0
 
     for t in range(nperiod):
+        # Reset every period: predecessors are only looked for within the
+        # same period (see the module docstring).
+        last_time, last_Y, last_H, last_sigma_obs, last_flat_index = {}, {}, {}, {}, {}
         Y = Y_dic[t]
         H = Hz_dic[t]
         times = Ytime_dic[t]
@@ -262,6 +273,10 @@ def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, pr
     ratio reduces to 1 (recovering the earlier, simpler form) whenever
     sigma_obs is constant across a same-site pair.
 
+    With tau > 0, rows with no predecessor in their period are dropped from
+    the likelihood: their err_var is inf, so err_var_inv = 0 gives them zero
+    weight in the Kalman update. Their Y/Hz are returned unchanged.
+
     tau <= 0 (including the disabled default) returns Y_dic/Hz_dic unchanged
     and err_var computed exactly as before this module existed.
     """
@@ -299,7 +314,9 @@ def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, pr
         # is most of the function's cost. Same result, bit for bit.
         Hz_out[t] = np.empty(Hz_dic[t].shape, dtype=float)
         _subtract_scaled_previous_rows(Hz_dic[t], prev_H_dic[t], phi_mean, Hz_out[t])
-        err_var_out[t] = np.where(has_prev, err_var * (1.0 - phi**2), err_var)
+
+        # Rows with no predecessor in this period are dropped from the likelihood.
+        err_var_out[t] = np.where(has_prev, err_var * (1.0 - phi**2), np.inf)
 
     return Y_out, Hz_out, err_var_out
 
@@ -350,9 +367,9 @@ def tau_log_posterior(log_tau, tau_max, standardised, prev_standardised, has_pre
     variance = np.where(has_prev, np.maximum(1.0 - phi**2, 1e-12), 1.0)
     innovation = standardised - phi * prev_standardised
 
-    # Rows with no preceding same-site observation contribute a constant
-    # N(0, 1) term that doesn't depend on tau, so they're excluded rather
-    # than included as a no-op.
+    # Rows with no preceding same-site observation in their period are
+    # dropped from the likelihood (see whiten_observations), so they're
+    # excluded.
     loglik = -0.5 * np.sum(np.where(has_prev, np.log(variance) + innovation**2 / variance, 0.0))
 
     z = tau / tau_max

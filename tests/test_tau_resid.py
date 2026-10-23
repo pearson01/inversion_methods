@@ -63,27 +63,25 @@ def _two_site_example():
     return Y_dic, Hz_dic, sigma_obs_dic, Ytime_dic, siteindicator_dic
 
 
-def test_prepare_tau_resid_indexing_finds_correct_same_site_predecessor_across_periods():
+def test_prepare_tau_resid_indexing_only_links_observations_within_a_period():
     Y_dic, Hz_dic, sigma_obs_dic, Ytime_dic, siteindicator_dic = _two_site_example()
 
     prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, gap_flat, prev_index_flat = prepare_tau_resid_indexing(
         Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigma_obs_dic, nperiod=2,
     )
 
-    # Each site's first-ever observation has no predecessor.
+    # Each site's first observation in each period has no predecessor.
     np.testing.assert_array_equal(has_prev_dic[0], [False, False, True])
     np.testing.assert_array_equal(gap_dic[0], [0.0, 0.0, 5.0])  # site A: t=5 - t=0
+    np.testing.assert_allclose(prev_Y_dic[0], [0.0, 0.0, 1.0])
 
-    # Period 1: site B's predecessor is period-0 row 1 (t=1, Y=2.0, gap=7h);
-    # site A's predecessor is period-0 row 2 (t=5, Y=3.0, gap=25h) -- not row 0.
-    np.testing.assert_array_equal(has_prev_dic[1], [True, True])
-    np.testing.assert_allclose(gap_dic[1], [7.0, 25.0])
-    np.testing.assert_allclose(prev_Y_dic[1], [2.0, 3.0])
-    np.testing.assert_allclose(prev_sigma_obs_dic[1], [0.1, 0.1])
+    # Period 1: neither site is linked to its period-0 observations.
+    np.testing.assert_array_equal(has_prev_dic[1], [False, False])
+    np.testing.assert_allclose(gap_dic[1], [0.0, 0.0])
 
     # Flat indices (order: p0r0, p0r1, p0r2, p1r0, p1r1).
-    np.testing.assert_array_equal(prev_index_flat, [-1, -1, 0, 1, 2])
-    np.testing.assert_allclose(gap_flat, [0.0, 0.0, 5.0, 7.0, 25.0])
+    np.testing.assert_array_equal(prev_index_flat, [-1, -1, 0, -1, -1])
+    np.testing.assert_allclose(gap_flat, [0.0, 0.0, 5.0, 0.0, 0.0])
 
 
 def test_whiten_observations_is_exact_noop_when_tau_is_zero():
@@ -119,19 +117,22 @@ def test_whiten_observations_matches_manual_gls_formula():
         sigma2_exc=sigma2_exc, tau=tau, nperiod=2,
     )
 
-    # Period 1, row 0: site B, gap=7h since its predecessor (period 0, row 1).
-    phi = np.exp(-7.0 / tau)
-    expected_Y = 4.0 - phi * 2.0
-    expected_H = np.array([2.0, 0.0]) - phi * np.array([0.0, 1.0])
+    # Period 0, row 2: site A, gap=5h since its predecessor (period 0, row 0).
+    phi = np.exp(-5.0 / tau)
+    expected_Y = 3.0 - phi * 1.0
+    expected_H = np.array([1.0, 1.0]) - phi * np.array([1.0, 0.0])
     expected_err_var = (sigma2_exc + 0.1**2) * (1 - phi**2)
 
-    assert Y_out[1][0] == pytest.approx(expected_Y)
-    np.testing.assert_allclose(Hz_out[1][0], expected_H)
-    assert err_var_out[1][0] == pytest.approx(expected_err_var)
+    assert Y_out[0][2] == pytest.approx(expected_Y)
+    np.testing.assert_allclose(Hz_out[0][2], expected_H)
+    assert err_var_out[0][2] == pytest.approx(expected_err_var)
 
-    # Rows with no predecessor are untouched.
-    assert Y_out[0][0] == pytest.approx(Y_dic[0][0])
-    assert err_var_out[0][0] == pytest.approx(sigma2_exc + sigma_obs_dic[0][0] ** 2)
+    # Rows with no predecessor in their period are dropped from the
+    # likelihood: Y/Hz untouched, infinite variance.
+    for t, row in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+        assert Y_out[t][row] == Y_dic[t][row]
+        np.testing.assert_array_equal(Hz_out[t][row], Hz_dic[t][row])
+        assert err_var_out[t][row] == np.inf
 
 
 def test_whiten_observations_applies_variance_ratio_when_sigma_obs_differs():
@@ -269,7 +270,7 @@ def test_whiten_observations_flushes_negligible_correlations_to_zero():
         assert not np.any((Y_out[t] != 0) & (np.abs(Y_out[t]) < tiny))
         np.testing.assert_array_equal(Y_out[t], Y_dic[t])
         np.testing.assert_array_equal(Hz_out[t], Hz_dic[t])
-        np.testing.assert_array_equal(err_var_out[t], 2.0 + sigma_obs_dic[t] ** 2)
+        np.testing.assert_array_equal(err_var_out[t], np.where(has_prev_dic[t], 2.0 + sigma_obs_dic[t] ** 2, np.inf))
 
 
 def test_subtract_scaled_previous_rows_matches_numpy_bit_for_bit():

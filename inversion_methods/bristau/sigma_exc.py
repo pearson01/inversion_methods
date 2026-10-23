@@ -99,8 +99,10 @@ def sigma2_exc_log_posterior(s_current, r, sigma_obs, alpha_prior, beta_prior, s
             u_i | u_prev ~ N(phi_i * u_prev, 1 - phi_i**2)
 
         The log(1 - phi_i**2) term doesn't depend on sigma2_exc, so it is
-        dropped. tau <= 0 sets phi = 0 everywhere, recovering the iid
-        likelihood exactly.
+        dropped. Observations with no predecessor in their period are
+        conditioned on rather than modelled, so they are left out, matching
+        whiten_observations(). tau <= 0 sets phi = 0 everywhere and keeps
+        every observation, recovering the iid likelihood exactly.
 
     Prior:
         sigma2_exc / sigma2_exc_max ~ Beta(alpha_prior, beta_prior)
@@ -161,6 +163,7 @@ def sigma2_exc_log_posterior(s_current, r, sigma_obs, alpha_prior, beta_prior, s
     if tau is None or tau <= 0:
         innovation = u
         variance = 1.0
+        keep = True
     else:
         has_prev = prev_index_flat >= 0
         phi = np.where(has_prev, np.exp(-gap_flat / tau), 0.0)
@@ -169,9 +172,11 @@ def sigma2_exc_log_posterior(s_current, r, sigma_obs, alpha_prior, beta_prior, s
         u_prev = np.where(has_prev, u[np.maximum(prev_index_flat, 0)], 0.0)
         innovation = u - phi * u_prev
         variance = 1.0 - phi**2
+        # Match whiten_observations(), which drops rows with no predecessor.
+        keep = has_prev
 
     # Gaussian log likelihood, dropping constants
-    loglik = -0.5 * np.sum(np.log(err) + innovation**2 / variance)
+    loglik = -0.5 * np.sum(np.where(keep, np.log(err) + innovation**2 / variance, 0.0))
 
     # Rescale sigma2_exc to the unit interval
     z = sigma2_exc / sigma2_exc_max

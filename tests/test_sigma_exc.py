@@ -165,25 +165,30 @@ def test_sigma2_exc_log_posterior_tau_zero_matches_iid_form():
     assert lp == pytest.approx(expected)
 
 
-def test_sigma2_exc_log_posterior_matches_dense_ar1_likelihood():
+def test_sigma2_exc_log_posterior_matches_dense_ar1_likelihood_given_first_obs():
     """
     Differences in log posterior between sigma2_exc values must match the
-    full-covariance AR(1) likelihood (flat prior, Jacobian removed), including
-    heteroscedastic sigma_obs, where the innovation itself depends on sigma2_exc.
+    full-covariance AR(1) likelihood (flat prior, Jacobian removed) conditional
+    on each site's first observation, including heteroscedastic sigma_obs,
+    where the innovation itself depends on sigma2_exc.
     """
     rng = np.random.default_rng(4)
     r = rng.normal(scale=2.0, size=8)
     sigma_obs = rng.uniform(0.5, 2.0, size=8)
     prev_index, gap = _two_site_layout()
     tau = 5.0
+    first = prev_index < 0
 
     def lp(s2):
         return sigma2_exc_log_posterior(np.log(s2), r, sigma_obs, 1.0, 1.0, 100.0, tau, prev_index, gap) - np.log(s2)
 
+    def conditional_loglik(s2):
+        # log p(r) - log p(first obs), the first obs being independent of each other
+        v = s2 + sigma_obs[first]**2
+        return _ar1_dense_loglik(r, sigma_obs, s2, tau, prev_index, gap) + 0.5 * np.sum(np.log(v) + r[first]**2 / v)
+
     for a, b in [(0.5, 3.0), (1.0, 8.0), (4.0, 20.0)]:
-        dense_diff = (_ar1_dense_loglik(r, sigma_obs, a, tau, prev_index, gap)
-                      - _ar1_dense_loglik(r, sigma_obs, b, tau, prev_index, gap))
-        assert lp(a) - lp(b) == pytest.approx(dense_diff)
+        assert lp(a) - lp(b) == pytest.approx(conditional_loglik(a) - conditional_loglik(b))
 
 
 def test_sample_sigma2_exc_ar1_recovers_variance_from_correlated_residuals():
