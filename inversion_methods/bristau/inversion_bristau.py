@@ -12,7 +12,7 @@ from inversion_methods.bristau.sigma_exc import update_sigma2_exc, sigma_exc_sch
 from inversion_methods.bristau.siqma_qx import update_sigma2_qx, sigma_qx_scheme_select, initialise_sigma2_qx_vector, sigma_qx_trace_params, build_group_id_coordinate
 from inversion_methods.bristau.kappa_x import update_kappa_x, update_kappa_x_marginal, kappa_x_scheme_select, initialise_kappa_x_vector, kappa_x_trace_params, kappa_max
 from inversion_methods.bristau.bristau_filter_sampler import iterative_augmented_mxkf, augmented_backward_sampler, amxkf_inputs
-from inversion_methods.bristau.tau_resid import tau_scheme_select, tau_trace_params, initialise_tau, update_tau_resid, prepare_tau_resid_indexing, whiten_observations, prepare_tau_sampler_inputs, sample_tau
+from inversion_methods.bristau.tau_resid import tau_scheme_select, tau_trace_params, initialise_tau, update_tau_resid, prepare_tau_resid_indexing, whiten_observations, prepare_tau_sampler_inputs, sample_tau, match_numba_threads_to_blas
 
 from openghg_inversions import utils, convert
 from openghg_inversions.hbmcmc.hbmcmc_output import define_output_filename
@@ -194,7 +194,7 @@ def analysis_form_select(config):
     return analysis_form
 
 
-def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verbose=True, chain_index=0, nchain=1):
+def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, print_chain_progress=True, chain_index=0, nchain=1):
     """
     Run the augmented FFBS/MXKF Gibbs sampler.
 
@@ -215,10 +215,11 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
         reproducible; see multichain.py, which does exactly this for each
         chain it runs.
 
-    verbose : bool, optional
-        When True (the default), prints the usual per-50-iteration
-        progress lines (current hyperparameter values, backward-sampled
-        state summary) and the per-iteration MXKF convergence-count line.
+    print_chain_progress : bool, optional
+        When True (the default), this chain prints a one-off line at
+        start-up giving its numba thread count, then the usual
+        per-50-iteration progress lines (current hyperparameter values,
+        backward-sampled state summary, MXKF convergence count).
         Set to False to run silently -- multichain.py does this for every
         chain except the one it keeps, so running several chains at once
         doesn't interleave nchain copies of the same progress output.
@@ -331,6 +332,14 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
      obs_gap_flat, obs_prev_index_flat) = prepare_tau_resid_indexing(
         config.Y_dic, config.Hz_dic, config.Ytime_dic, config.siteindicator_dic, config.sigma_obs_dic, config.nperiod,
     )
+
+    # whiten_observations() runs on numba threads, which numba sizes on its
+    # own rather than from OMP_NUM_THREADS. Cap them here, in this chain's
+    # own process, so nchain chains don't oversubscribe the job's CPUs.
+    numba_threads = match_numba_threads_to_blas()
+
+    if print_chain_progress:
+        print(f"numba threads for whiten_observations: {numba_threads}", flush=True)
 
     if tau_scheme != "fixed":
         tau_aprior, tau_bprior = prior_parser(config.tau_resid_prior)
@@ -480,7 +489,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
     # ------------------------------------------------------------------
 
     for i in range(config.iterations):
-        if verbose and i % 50 == 0:
+        if print_chain_progress and i % 50 == 0:
             print(
                 f"Iteration: {i}, sigma2_exc: {sigma2_exc_current}, sigma2_qx min/max: ({sigma2_qx_bf_current.min()}, {sigma2_qx_bf_current.max()}), kappa_x: ({kappa_x_vector_current}), tau_resid: {tau_current}", flush=True,)
 
@@ -563,7 +572,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
             err_var_dic=err_var_dic,
             Y_dic_raw=config.Y_dic,
             Hz_dic_raw=config.Hz_dic,
-            verbose=verbose,
+            print_chain_progress=print_chain_progress,
             analysis_form=analysis_form,
         )
 
@@ -577,7 +586,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
 
         (zmusample, zsample, state_residuals) = (augmented_backward_sampler(sampler_inputs, rng=rng))
 
-        if verbose and i % 50 == 0:
+        if print_chain_progress and i % 50 == 0:
             print(f"        z sample: median: {np.median(zsample)}, mean: {np.mean(zsample)}, std: {np.std(zsample)}", flush=True,)
 
         xtrace[i] = zsample[:, :config.nbasis,]

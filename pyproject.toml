@@ -21,7 +21,8 @@ dependencies = [
     "numpy",
     "openghg",
     "openghg_inversions",
-    "sparse"
+    "sparse",
+    "numba"
 ]
 
 [project.urls]

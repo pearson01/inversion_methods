@@ -118,8 +118,9 @@ def _run_one_chain(inversion_input, seed_sequence, keep_full_output, chain_index
     keep_full_output : bool
         True for exactly one chain (the "keeper", see run_chains()). That
         chain returns its full set of traces, and is also the only chain
-        allowed to print its usual progress output (see the `verbose`
-        argument of augmented_ffbs_mxkf_gibbs_multi_slice) -- otherwise,
+        allowed to print its usual progress output (see the
+        `print_chain_progress` argument of
+        augmented_ffbs_mxkf_gibbs_multi_slice) -- otherwise,
         running nchain chains at once would interleave nchain copies of
         the same progress lines. Every other chain only needs to feed into
         the convergence check, so it summarises its own output (see
@@ -150,7 +151,7 @@ def _run_one_chain(inversion_input, seed_sequence, keep_full_output, chain_index
 
     # Only the keeper chain prints -- see the keep_full_output docstring
     # above.
-    gibbs_output = augmented_ffbs_mxkf_gibbs_multi_slice(inversion_input, rng=rng, verbose=keep_full_output, chain_index=chain_index, nchain=nchain)
+    gibbs_output = augmented_ffbs_mxkf_gibbs_multi_slice(inversion_input, rng=rng, print_chain_progress=keep_full_output, chain_index=chain_index, nchain=nchain)
 
     if keep_full_output:
         return gibbs_output

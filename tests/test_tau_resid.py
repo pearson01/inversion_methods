@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+import numba
 import numpy as np
 import pytest
 
@@ -14,6 +15,8 @@ from inversion_methods.bristau.tau_resid import (
     prepare_tau_sampler_inputs,
     sample_tau,
     update_tau_resid,
+    match_numba_threads_to_blas,
+    _subtract_scaled_previous_rows,
 )
 
 
@@ -267,3 +270,68 @@ def test_whiten_observations_flushes_negligible_correlations_to_zero():
         np.testing.assert_array_equal(Y_out[t], Y_dic[t])
         np.testing.assert_array_equal(Hz_out[t], Hz_dic[t])
         np.testing.assert_array_equal(err_var_out[t], 2.0 + sigma_obs_dic[t] ** 2)
+
+
+def test_subtract_scaled_previous_rows_matches_numpy_bit_for_bit():
+    # The compiled loop must give exactly what the plain numpy expression
+    # gives -- not just close to it -- so switching to it can't change any
+    # result. Includes rows with phi_mean == 0 (no same-site predecessor).
+    rng = np.random.default_rng(0)
+    Hz = rng.normal(size=(500, 37))
+    prev_H = rng.normal(size=(500, 37))
+    phi_mean = rng.uniform(size=500)
+    phi_mean[::7] = 0.0
+
+    out = np.empty_like(Hz)
+    _subtract_scaled_previous_rows(Hz, prev_H, phi_mean, out)
+
+    np.testing.assert_array_equal(out, Hz - phi_mean[:, None] * prev_H)
+
+
+def test_subtract_scaled_previous_rows_handles_period_with_no_observations():
+    Hz = np.empty((0, 4))
+    out = np.empty_like(Hz)
+    _subtract_scaled_previous_rows(Hz, np.empty((0, 4)), np.empty(0), out)
+    assert out.shape == (0, 4)
+
+
+@pytest.fixture
+def restore_numba_threads():
+    # numba's thread count is process-wide state; put it back after each
+    # test so the thread-capping tests can't leak into any other test.
+    original = numba.get_num_threads()
+    yield
+    numba.set_num_threads(original)
+
+
+def test_match_numba_threads_to_blas_follows_omp_num_threads(monkeypatch, restore_numba_threads):
+    monkeypatch.delenv("NUMBA_NUM_THREADS", raising=False)
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+
+    assert match_numba_threads_to_blas() == 1
+    assert numba.get_num_threads() == 1
+
+
+def test_match_numba_threads_to_blas_caps_at_numba_pool_size(monkeypatch, restore_numba_threads):
+    monkeypatch.delenv("NUMBA_NUM_THREADS", raising=False)
+    monkeypatch.setenv("OMP_NUM_THREADS", str(numba.config.NUMBA_NUM_THREADS + 100))
+
+    assert match_numba_threads_to_blas() == numba.config.NUMBA_NUM_THREADS
+
+
+def test_match_numba_threads_to_blas_leaves_explicit_numba_setting_alone(monkeypatch, restore_numba_threads):
+    before = numba.get_num_threads()
+    monkeypatch.setenv("NUMBA_NUM_THREADS", str(before))
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+
+    assert match_numba_threads_to_blas() == before
+
+
+def test_match_numba_threads_to_blas_ignores_unparseable_omp_num_threads(monkeypatch, restore_numba_threads):
+    # OMP_NUM_THREADS can legally be a nested list such as "4,2"; leave
+    # numba's default alone rather than guess.
+    before = numba.get_num_threads()
+    monkeypatch.delenv("NUMBA_NUM_THREADS", raising=False)
+    monkeypatch.setenv("OMP_NUM_THREADS", "4,2")
+
+    assert match_numba_threads_to_blas() == before

@@ -36,7 +36,7 @@ class amxkf_inputs:
     err_var_dic: dict | None = None
     Y_dic_raw: dict | None = None
     Hz_dic_raw: dict | None = None
-    verbose: bool = True
+    print_chain_progress: bool = True
     analysis_form: str = "information"
 
 
@@ -683,7 +683,7 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
             converge_count += 1
                 
 
-    if config.verbose and config.iteration % 50 == 0:
+    if config.print_chain_progress and config.iteration % 50 == 0:
         print(f"            {converge_count} convergences in {config.nperiod} MXKF time steps")
 
     # The backward sampler computes residuals (Y_dic - Hz_dic @ z) purely as a

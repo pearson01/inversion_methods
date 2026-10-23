@@ -203,7 +203,7 @@ def test_gibbs_sampler_kappa_and_sigma_qx_inner_outer(joint):
         sigma2_exc_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
     )
     config.joint_kappa_sigma_qx = joint
-    outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config, rng=np.random.default_rng(0), verbose=False)
+    outputs = augmented_ffbs_mxkf_gibbs_multi_slice(config, rng=np.random.default_rng(0), print_chain_progress=False)
     sigma2_qx_trace, kappa_x_trace = outputs[4], outputs[5]
 
     assert kappa_x_trace.shape[1] == 2

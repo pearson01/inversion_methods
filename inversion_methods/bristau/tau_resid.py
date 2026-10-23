@@ -28,6 +28,9 @@ everywhere, whiten_observations() returns Y/Hz unchanged and err_var exactly
 as computed before this module existed.
 """
 
+import os
+
+import numba
 import numpy as np
 
 
@@ -170,6 +173,68 @@ def prepare_tau_resid_indexing(Y_dic, Hz_dic, Ytime_dic, siteindicator_dic, sigm
     return prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, gap_flat, prev_index_flat
 
 
+def match_numba_threads_to_blas():
+    """
+    Give numba the same number of threads as BLAS (OMP_NUM_THREADS).
+
+    whiten_observations() runs its heaviest step on numba threads (see
+    _subtract_scaled_previous_rows below). numba ignores OMP_NUM_THREADS:
+    by default it starts one thread per CPU the process can see. Every
+    chain is its own process, so on a 16-CPU slurm job with nchain = 4 that
+    would be 4 x 16 = 64 numba threads competing for 16 cores.
+
+    numba's thread count is a per-process setting, so this has to be called
+    inside each chain's own process -- augmented_ffbs_mxkf_gibbs_multi_slice
+    calls it once, during its setup, before the Gibbs loop starts.
+
+    An explicitly set NUMBA_NUM_THREADS always wins and is left alone, as is
+    numba's default when OMP_NUM_THREADS isn't set either.
+
+    Returns
+    -------
+    int
+        The number of threads numba will now use.
+    """
+    if "NUMBA_NUM_THREADS" not in os.environ and "OMP_NUM_THREADS" in os.environ:
+        try:
+            requested = int(os.environ["OMP_NUM_THREADS"])
+        except ValueError:
+            requested = None
+
+        if requested is not None:
+            # numba can't go above the size of the thread pool it started
+            # with (numba.config.NUMBA_NUM_THREADS, one per visible CPU).
+            numba.set_num_threads(max(1, min(requested, numba.config.NUMBA_NUM_THREADS)))
+
+    return numba.get_num_threads()
+
+
+@numba.njit(parallel=True)
+def _subtract_scaled_previous_rows(Hz, prev_H, phi_mean, out):
+    """
+    Fill out[i, :] = Hz[i, :] - phi_mean[i] * prev_H[i, :] for every row i.
+
+    This is exactly the numpy expression Hz - phi_mean[:, None] * prev_H,
+    written as a loop numba compiles to machine code. On large runs Hz is
+    tens of MB per period, and that expression's speed is limited by memory
+    traffic rather than arithmetic: numpy makes at least two full passes
+    over arrays that size, on a single thread. This loop makes one pass,
+    with the rows shared out across numba's threads.
+
+    The result is bit-for-bit identical to the numpy expression, for any
+    number of threads: each element is the same single multiply and
+    subtract, done independently of every other element. Don't add
+    fastmath=True -- it lets the compiler fuse the multiply and subtract,
+    which changes the last bits of the result.
+
+    Compiled on first call (about 2 s, once per chain process).
+    """
+    for i in numba.prange(Hz.shape[0]):
+        scale = phi_mean[i]
+        for j in range(Hz.shape[1]):
+            out[i, j] = Hz[i, j] - scale * prev_H[i, j]
+
+
 def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, prev_sigma_obs_dic, gap_dic, has_prev_dic, sigma2_exc, tau, nperiod):
     """
     One-shot GLS whitening transform for the AR(1)/OU residual-correlation
@@ -229,12 +294,11 @@ def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, pr
 
         Y_out[t] = Y_dic[t] - phi_mean * prev_Y_dic[t]
 
-        # Same result as Hz_dic[t] - phi_mean[:, None] * prev_H_dic[t], bit for
-        # bit, but builds one full-size array rather than two (a temporary for
-        # the product, then the result), which is most of this function's cost.
-        Hz_whitened = prev_H_dic[t] * -phi_mean[:, None]
-        Hz_whitened += Hz_dic[t]
-        Hz_out[t] = Hz_whitened
+        # Hz_out[t] = Hz_dic[t] - phi_mean[:, None] * prev_H_dic[t], done by a
+        # compiled, multi-threaded loop because on large runs this one line
+        # is most of the function's cost. Same result, bit for bit.
+        Hz_out[t] = np.empty(Hz_dic[t].shape, dtype=float)
+        _subtract_scaled_previous_rows(Hz_dic[t], prev_H_dic[t], phi_mean, Hz_out[t])
         err_var_out[t] = np.where(has_prev, err_var * (1.0 - phi**2), err_var)
 
     return Y_out, Hz_out, err_var_out
