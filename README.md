@@ -97,9 +97,16 @@ covariance `Q_aug`, whose diagonal entries are the per-parameter process-noise v
 **Forward filter.** `iterative_augmented_mxkf` propagates the forecast mean/covariance forward
 through each monthly `Hz_dic`/`Y_dic` pair and computes the analysis update. Because the
 log-normal state transformation makes the observation operator nonlinear in the untransformed
-state, `iterative_analysis_update` performs an inner Gauss-Newton loop (with optional Anderson
-acceleration and backtracking, `max_inner_iters=5`, `tol=1e-2`) to relinearise around the current
-analysis estimate until it is consistent with the forecast to within tolerance. The observation
+state, `iterative_analysis_update` finds the analysis mean by minimising the cost function
+
+```
+J(u) = (u - zf)' Pf^-1 (u - zf) + (Y - H z(u))' R^-1 (Y - H z(u))
+```
+
+with an inner Gauss-Newton loop (`max_inner_iters=5`, `tol=1e-2`). A step is accepted only if it
+lowers `J`: a first-order Anderson-accelerated step is tried first, then a backtracked Gauss-Newton
+step. The update counts as converged once the Gauss-Newton step is smaller than `tol` in every
+component, so the result does not depend on the starting (warm-start) estimate. The observation
 operator is first reduced to a per-month `nz x nz` Gram matrix `G = H.T R^-1 H` (`nz` being the
 augmented state dimension), so that the update cost scales with the (small) state dimension rather
 than the (larger) number of observations per month, which is typically much greater than `nz`.

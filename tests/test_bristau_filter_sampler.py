@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 from scipy.linalg import cholesky
+from scipy.optimize import minimize
 
 from inversion_methods.bristau.bristau_filter_sampler import (
     augmented_forecast_model,
@@ -10,6 +11,8 @@ from inversion_methods.bristau.bristau_filter_sampler import (
     iterative_augmented_mxkf,
     augmented_backward_sampler,
     amxkf_inputs,
+    _analysis_cost_change,
+    _backtracking_line_search,
 )
 
 
@@ -100,7 +103,7 @@ def test_iterative_analysis_update_matches_closed_form_linear_kalman_filter():
     g = H.T @ (r_inv * Y)
 
     za_mu, Pa, _L, converged = iterative_analysis_update(
-        zf_mu, za_mu_current=zf_mu.copy(), Y=Y, G=G, g=g, Pf=Pf, H=H,
+        zf_mu, za_mu_current=zf_mu.copy(), G=G, g=g, Pf=Pf,
         xprior=xprior, bcprior=None, rprior=rprior, nbasis=nbasis, nbc=nbc, nr=nr,
     )
 
@@ -154,7 +157,11 @@ def test_filter_and_backward_sampler_run_end_to_end_with_zero_boundary_condition
     assert residuals.shape[0] == inputs.nperiod * 8
 
 
-def _lognormal_analysis_problem(seed=41, nbasis=5, nbc=0, nr=2, ny=30):
+def _lognormal_problem_and_observations(seed=41, nbasis=5, nbc=0, nr=2, ny=30):
+    """
+    Keyword arguments for iterative_analysis_update with all-lognormal
+    priors, plus the Y, H and r_inv that G and g were built from.
+    """
     rng = np.random.default_rng(seed)
     nz = nbasis + nbc + nr
     A = rng.normal(size=(nz, nz))
@@ -166,8 +173,14 @@ def _lognormal_analysis_problem(seed=41, nbasis=5, nbc=0, nr=2, ny=30):
     G = H.T @ (r_inv[:, None] * H)
     g = H.T @ (r_inv * Y)
     prior = {"pdf": "lognormal"}
-    return dict(zf_mu=zf_mu, za_mu_current=zf_mu.copy(), Y=Y, G=G, g=g, Pf=Pf, H=H,
-                xprior=prior, bcprior=None, rprior=prior, nbasis=nbasis, nbc=nbc, nr=nr)
+    problem = dict(zf_mu=zf_mu, za_mu_current=zf_mu.copy(), G=G, g=g, Pf=Pf,
+                   xprior=prior, bcprior=None, rprior=prior, nbasis=nbasis, nbc=nbc, nr=nr)
+    return problem, Y, H, r_inv
+
+
+def _lognormal_analysis_problem(**kwargs):
+    problem, _Y, _H, _r_inv = _lognormal_problem_and_observations(**kwargs)
+    return problem
 
 
 @pytest.mark.parametrize("seed", [41, 42, 43])
@@ -201,3 +214,148 @@ def test_iterative_analysis_update_defaults_to_information_form():
 def test_iterative_analysis_update_rejects_unknown_analysis_form():
     with pytest.raises(ValueError, match="analysis_form"):
         iterative_analysis_update(**_lognormal_analysis_problem(), analysis_form="kalman")
+
+
+# ---------------------------------------------------------------------------
+# The Gauss-Newton loop in iterative_analysis_update must find the minimum of
+# the analysis cost function
+#
+#     J(u) = (u - zf)' Pf^-1 (u - zf) + (Y - H z(u))' R^-1 (Y - H z(u))
+#
+# wherever it starts. An earlier version accepted a step only if it lowered
+# the unweighted observation misfit, so a starting estimate that already fitted
+# the observations better than the minimum of J (e.g. a warm start from the
+# previous Gibbs iteration) barely moved, yet was still reported as converged.
+# ---------------------------------------------------------------------------
+
+
+def _observation_misfit(u, Y, H, r_inv):
+    """(Y - H z)' R^-1 (Y - H z) for all-lognormal priors, z = exp(u)."""
+    residual = Y - H @ np.exp(u)
+    return residual @ (r_inv * residual)
+
+
+def _analysis_cost(u, zf_mu, Pf, Y, H, r_inv):
+    """J(u) for all-lognormal priors, evaluated directly from Y and H."""
+    departure = u - zf_mu
+    return departure @ np.linalg.solve(Pf, departure) + _observation_misfit(u, Y, H, r_inv)
+
+
+def _minimise_analysis_cost_directly(zf_mu, Pf, Y, H, r_inv):
+    """Reference minimiser of J, from a general-purpose optimiser."""
+    def gradient(u):
+        z = np.exp(u)
+        residual = Y - H @ z
+        return 2 * np.linalg.solve(Pf, u - zf_mu) - 2 * z * (H.T @ (r_inv * residual))
+
+    cost = lambda u: _analysis_cost(u, zf_mu, Pf, Y, H, r_inv)
+
+    return minimize(cost, zf_mu, jac=gradient, method="BFGS", options={"gtol": 1e-10}).x
+
+
+@pytest.mark.parametrize("analysis_form", ["information", "woodbury"])
+def test_iterative_analysis_update_reaches_kalman_analysis_from_overfitted_start(analysis_form):
+    """
+    Linear (all-normal) problem with a tight forecast covariance, started from
+    the observation-only least-squares fit. That start fits the observations
+    better than the Kalman analysis does, so a step test on the observation
+    misfit alone rejects every step towards the right answer.
+    """
+    rng = np.random.default_rng(1)
+    nbasis, nbc, nr, ny = 4, 0, 2, 40
+    nz = nbasis + nr
+
+    H = np.hstack([rng.uniform(0.2, 1.0, (ny, nbasis)), np.zeros((ny, nr))])
+    r_inv = np.full(ny, 1 / 0.3**2)
+    Y = H[:, :nbasis] @ np.array([1.5, 0.7, 1.2, 0.9]) + rng.normal(0, 0.3, ny)
+    G = H.T @ (r_inv[:, None] * H)
+    g = H.T @ (r_inv * Y)
+
+    zf_mu = np.ones(nz)
+    Pf = np.diag(np.r_[np.full(nbasis, 0.05**2), np.full(nr, 0.1)])
+    prior = {"pdf": "normal"}
+
+    x_least_squares = np.linalg.lstsq(H[:, :nbasis], Y, rcond=None)[0]
+    overfitted_start = np.r_[x_least_squares, zf_mu[nbasis:]]
+
+    za_mu, Pa, _L, converged = iterative_analysis_update(
+        zf_mu, za_mu_current=overfitted_start, G=G, g=g, Pf=Pf,
+        xprior=prior, bcprior=None, rprior=prior, nbasis=nbasis, nbc=nbc, nr=nr,
+        analysis_form=analysis_form,
+    )
+
+    Pa_exact = np.linalg.inv(np.linalg.inv(Pf) + G)
+    za_exact = zf_mu + Pa_exact @ (g - G @ zf_mu)
+
+    assert converged
+    np.testing.assert_allclose(za_mu, za_exact, rtol=1e-8, atol=1e-10)
+    np.testing.assert_allclose(Pa, Pa_exact, rtol=1e-8, atol=1e-12)
+
+
+@pytest.mark.parametrize("analysis_form", ["information", "woodbury"])
+@pytest.mark.parametrize("start", ["forecast", "overfitted", "far"])
+def test_iterative_analysis_update_finds_minimum_of_cost_with_lognormal_priors(start, analysis_form):
+    problem, Y, H, r_inv = _lognormal_problem_and_observations(seed=41)
+    zf_mu, Pf = problem["zf_mu"], problem["Pf"]
+
+    reference = _minimise_analysis_cost_directly(zf_mu, Pf, Y, H, r_inv)
+
+    if start == "forecast":
+        problem["za_mu_current"] = zf_mu.copy()
+
+    elif start == "overfitted":
+        # Best fit to the observations alone (bounded to keep exp(u) sensible).
+        misfit = lambda u: _observation_misfit(u, Y, H, r_inv)
+        problem["za_mu_current"] = minimize(misfit, reference, method="L-BFGS-B", bounds=[(-3, 3)] * len(zf_mu)).x
+        assert misfit(problem["za_mu_current"]) < misfit(reference)
+
+    elif start == "far":
+        problem["za_mu_current"] = zf_mu + 1.0
+
+    # Tight tolerance and plenty of iterations: this tests where the loop
+    # ends up, not how quickly it gets there.
+    za_mu, _Pa, _L, converged = iterative_analysis_update(**problem, max_inner_iters=50, tol=1e-6, analysis_form=analysis_form)
+
+    assert converged
+    np.testing.assert_allclose(za_mu, reference, atol=1e-5)
+
+
+def test_iterative_analysis_update_reports_not_converged_when_out_of_iterations():
+    problem = _lognormal_analysis_problem(seed=41)
+    problem["za_mu_current"] = problem["zf_mu"] + 1.0
+
+    *_, converged = iterative_analysis_update(**problem, max_inner_iters=1)
+
+    assert not converged
+
+
+def test_analysis_cost_change_matches_direct_evaluation():
+    problem, Y, H, r_inv = _lognormal_problem_and_observations(seed=3)
+    zf_mu, Pf, G, g = problem["zf_mu"], problem["Pf"], problem["G"], problem["g"]
+
+    rng = np.random.default_rng(4)
+    u_old = zf_mu + rng.normal(scale=0.2, size=zf_mu.size)
+    u_new = u_old + rng.normal(scale=0.05, size=zf_mu.size)
+
+    # All blocks are lognormal and there are no boundary conditions, so
+    # state_vector_mu_transform is exp().
+    change = _analysis_cost_change(u_new, u_old, zf_mu, np.linalg.cholesky(Pf), G, g, np.exp)
+
+    expected = _analysis_cost(u_new, zf_mu, Pf, Y, H, r_inv) - _analysis_cost(u_old, zf_mu, Pf, Y, H, r_inv)
+
+    np.testing.assert_allclose(change, expected, rtol=1e-9)
+
+
+def test_backtracking_line_search_halves_step_until_cost_decreases():
+    # The cost only goes down for steps shorter than 0.3 in every component.
+    cost_change = lambda u_new, u_old: -1.0 if np.max(np.abs(u_new - u_old)) < 0.3 else 1.0
+
+    step = _backtracking_line_search(np.zeros(3), np.ones(3), cost_change)
+
+    np.testing.assert_allclose(step, np.full(3, 0.25))
+
+
+def test_backtracking_line_search_returns_none_when_no_step_lowers_cost():
+    cost_never_decreases = lambda u_new, u_old: 1.0
+
+    assert _backtracking_line_search(np.zeros(3), np.ones(3), cost_never_decreases) is None

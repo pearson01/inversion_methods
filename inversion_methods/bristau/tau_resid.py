@@ -228,7 +228,13 @@ def whiten_observations(Y_dic, Hz_dic, sigma_obs_dic, prev_Y_dic, prev_H_dic, pr
         phi_mean = phi * ratio
 
         Y_out[t] = Y_dic[t] - phi_mean * prev_Y_dic[t]
-        Hz_out[t] = Hz_dic[t] - phi_mean[:, None] * prev_H_dic[t]
+
+        # Same result as Hz_dic[t] - phi_mean[:, None] * prev_H_dic[t], bit for
+        # bit, but builds one full-size array rather than two (a temporary for
+        # the product, then the result), which is most of this function's cost.
+        Hz_whitened = prev_H_dic[t] * -phi_mean[:, None]
+        Hz_whitened += Hz_dic[t]
+        Hz_out[t] = Hz_whitened
         err_var_out[t] = np.where(has_prev, err_var * (1.0 - phi**2), err_var)
 
     return Y_out, Hz_out, err_var_out

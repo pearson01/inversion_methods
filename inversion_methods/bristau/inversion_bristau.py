@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 import arviz as az
+from scipy.stats import beta, invgamma
 from pandas import date_range, to_datetime
 from dataclasses import dataclass
 
@@ -150,6 +151,31 @@ def prior_parser(prior):
         raise ValueError(f"Your choice of prior is rather whack, check that ini file for {prior}")
 
 
+def initial_quantile(chain_index, nchain, parameter_index):
+    """
+    Prior quantile at which a chain starts one hyperparameter.
+
+    Chains are spread evenly over the central 90% of each prior
+    (5th to 95th percentile). The order is rotated by one place for each
+    hyperparameter, so no chain starts every hyperparameter low (or high).
+    For example, with 4 chains:
+
+                 kappa_x  sigma2_qx  sigma2_exc  tau
+        chain 0   0.05     0.35       0.65       0.95
+        chain 1   0.35     0.65       0.95       0.05
+        chain 2   0.65     0.95       0.05       0.35
+        chain 3   0.95     0.05       0.35       0.65
+
+    A single chain starts every hyperparameter at its prior median.
+    """
+    if nchain == 1:
+        return 0.5
+
+    quantiles = np.linspace(0.05, 0.95, nchain)
+
+    return quantiles[(chain_index + parameter_index) % nchain]
+
+
 def analysis_form_select(config):
     """
     Normalise and validate config.analysis_form, the choice of Kalman gain /
@@ -168,9 +194,13 @@ def analysis_form_select(config):
     return analysis_form
 
 
-def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verbose=True):
+def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verbose=True, chain_index=0, nchain=1):
     """
     Run the augmented FFBS/MXKF Gibbs sampler.
+
+    chain_index, nchain : int, optional
+        Which chain this is, out of how many. Sets where each sampled
+        hyperparameter starts in its prior -- see initial_quantile().
 
     rng : numpy.random.Generator, optional
         Source of randomness for every random draw this sampler makes (the
@@ -338,13 +368,11 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
     if kappa_x_scheme != "fixed":
         kappa_x_aprior, kappa_x_bprior = prior_parser(config.kappa_x_prior)
         kappa_x_max = kappa_max(config.nperiod, config.kappa_x_minfold)
-        initial_kappa_x = min(0.8, kappa_x_max)
 
     else:
         kappa_x_aprior = None
         kappa_x_bprior = None
         kappa_x_max = None
-        initial_kappa_x = fixed_kappa_x
 
     # Joint (kappa_x, sigma2_qx) update: only meaningful when both are sampled.
     joint_kappa_sigma_qx = (config.joint_kappa_sigma_qx and kappa_x_scheme != "fixed" and sigma_qx_scheme != "fixed")
@@ -406,12 +434,36 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
 
     # ------------------------------------------------------------------
     # Initial values
+    #
+    # Each sampled hyperparameter starts at a quantile of its own prior
+    # (with the same truncation its sampler uses), chosen per chain by
+    # initial_quantile(). Fixed hyperparameters ignore these values.
     # ------------------------------------------------------------------
 
-    initial_sigma2_exc = 400.0
+    initial_kappa_x = fixed_kappa_x
+    initial_sigma2_qx = None
+    initial_sigma2_exc = None
+    initial_tau = None
+
+    if kappa_x_scheme != "fixed":
+        p = initial_quantile(chain_index, nchain, parameter_index=0)
+        p_max = beta.cdf(kappa_x_max, kappa_x_aprior, kappa_x_bprior)
+        initial_kappa_x = beta.ppf(p * p_max, kappa_x_aprior, kappa_x_bprior)
+
+    if sigma_qx_scheme != "fixed":
+        p = initial_quantile(chain_index, nchain, parameter_index=1)
+        p_max = invgamma.cdf(sigma2_qx_max, sigma2_qx_aprior, scale=sigma2_qx_bprior)
+        initial_sigma2_qx = invgamma.ppf(p * p_max, sigma2_qx_aprior, scale=sigma2_qx_bprior)
+
+    if sigma_exc_scheme != "fixed additive":
+        p = initial_quantile(chain_index, nchain, parameter_index=2)
+        initial_sigma2_exc = sigma2_exc_max * beta.ppf(p, sigma2_exc_aprior, sigma2_exc_bprior)
+
+    if tau_scheme != "fixed":
+        p = initial_quantile(chain_index, nchain, parameter_index=3)
+        initial_tau = tau_max * beta.ppf(p, tau_aprior, tau_bprior)
 
     sigma2_exc_current = initialise_sigma2_exc(sigma_exc_scheme, fixed_sigma2_exc, initial_sigma2_exc)
-    initial_sigma2_qx = 0.4
 
     sigma2_qx_bf_current = initialise_sigma2_qx_vector(sigma_qx_scheme, fixed_sigma2_qx, initial_sigma2_qx, config.nbasis, config.nxout, nxin, ningroup, inner_group_id)
 
@@ -420,8 +472,6 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, verb
     sigma2_qrs = np.full(config.nr, sigma2_qr, dtype=float,)
 
     kappa_x_vector_current = initialise_kappa_x_vector(kappa_x_scheme, fixed_kappa_x, initial_kappa_x, n_kappa_x_parameters)
-
-    initial_tau = 6.0
 
     tau_current = initialise_tau(tau_scheme, fixed_tau, initial_tau)
 

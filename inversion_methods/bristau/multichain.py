@@ -96,7 +96,7 @@ def _summarise_chain_output(gibbs_output):
     }
 
 
-def _run_one_chain(inversion_input, seed_sequence, keep_full_output):
+def _run_one_chain(inversion_input, seed_sequence, keep_full_output, chain_index=0, nchain=1):
     """
     Run a single, independent chain. This function is what actually
     executes inside each separate worker process spawned by run_chains().
@@ -126,6 +126,11 @@ def _run_one_chain(inversion_input, seed_sequence, keep_full_output):
         _summarise_chain_output above) and throws the large traces away
         *before* sending anything back to the main process -- this keeps
         the amount of data copied between processes small.
+    chain_index, nchain : int
+        Which chain this is, out of how many. Each chain starts its
+        hyperparameters at different prior quantiles (see
+        inversion_bristau.initial_quantile), so the convergence check
+        compares chains that genuinely started apart.
 
     Returns
     -------
@@ -145,7 +150,7 @@ def _run_one_chain(inversion_input, seed_sequence, keep_full_output):
 
     # Only the keeper chain prints -- see the keep_full_output docstring
     # above.
-    gibbs_output = augmented_ffbs_mxkf_gibbs_multi_slice(inversion_input, rng=rng, verbose=keep_full_output)
+    gibbs_output = augmented_ffbs_mxkf_gibbs_multi_slice(inversion_input, rng=rng, verbose=keep_full_output, chain_index=chain_index, nchain=nchain)
 
     if keep_full_output:
         return gibbs_output
@@ -370,7 +375,7 @@ def run_chains(
 
     with ProcessPoolExecutor(max_workers=nchain, mp_context=spawn_context) as pool:
         futures = [
-            pool.submit(_run_one_chain, inversion_input, seed, chain_index == keep_chain_index)
+            pool.submit(_run_one_chain, inversion_input, seed, chain_index == keep_chain_index, chain_index, nchain)
             for chain_index, seed in enumerate(per_chain_seeds)
         ]
         # .result() blocks until that particular chain is done; since all
