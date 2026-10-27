@@ -82,6 +82,13 @@ class InversionParameters:
     #               covariance).
     analysis_form: str = "information"
 
+    # warm_start (bool): Where each Gibbs iteration's iterated analysis
+    #               update starts from. False (default) starts every period
+    #               from its forecast mean, so no chain can carry a local
+    #               optimum from one iteration to the next; True starts from
+    #               the previous iteration's analysis mean.
+    warm_start: bool = False
+
     # --- Multi-chain convergence checking (see multichain.py) -----------
     # nchain (int): Number of independent copies of the Gibbs sampler to run.
     #               1 (the default) just runs the sampler once. Set to e.g. 4 to also get a
@@ -221,6 +228,7 @@ def bristau_function(config: InversionParameters):
         tau_resid_prior=config.tau_resid_prior,
         tau_resid_max=config.tau_resid_max,
         analysis_form=config.analysis_form,
+        warm_start=config.warm_start,
         )
 
     end_data = time.time()

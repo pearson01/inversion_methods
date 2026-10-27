@@ -38,6 +38,7 @@ class amxkf_inputs:
     Hz_dic_raw: dict | None = None
     print_chain_progress: bool = True
     analysis_form: str = "information"
+    warm_start: bool = False
 
 
 @dataclass
@@ -428,7 +429,7 @@ def _backtracking_line_search(za_mu, gn_step, cost_change, max_tries=10):
     return None
 
 
-def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, rprior, nbasis, nbc, nr, max_inner_iters=5, tol=1e-02, analysis_form="information"):
+def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, rprior, nbasis, nbc, nr, max_inner_iters=10, tol=1e-02, analysis_form="information"):
 
     """
     Analysis update for one filter time step, iterated with Gauss-Newton to
@@ -677,7 +678,10 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
             # zf_mu[t], Pf[t] = slow_augmented_forecast_model(za_mu[t-1], Pa[t-1], config.F_aug, Q_aug)
 
 
-        za_mu[t], Pa[t], Pf_chol[t], converged = iterative_analysis_update(zf_mu[t], za_mu_current[t], G_list[t], g_list[t], Pf[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr, analysis_form=config.analysis_form)
+        # warm_start=False (default): start every period from its forecast mean.
+        za_mu_start = za_mu_current[t] if config.warm_start else zf_mu[t]
+
+        za_mu[t], Pa[t], Pf_chol[t], converged = iterative_analysis_update(zf_mu[t], za_mu_start, G_list[t], g_list[t], Pf[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr, analysis_form=config.analysis_form)
 
         if converged:
             converge_count += 1

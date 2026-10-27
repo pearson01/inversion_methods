@@ -324,3 +324,25 @@ def test_gibbs_sampler_rejects_invalid_analysis_form(value):
     config = dataclasses.replace(_make_inversion_input(), analysis_form=value)
     with pytest.raises((ValueError, TypeError), match="analysis_form"):
         augmented_ffbs_mxkf_gibbs_multi_slice(config)
+
+
+def test_gibbs_sampler_warm_start_matches_default_cold_start():
+    """
+    warm_start=False (the default) starts every period's iterated analysis
+    update from its forecast mean; warm_start=True starts from the previous
+    iteration's analysis mean. On this well-posed problem both starting
+    points converge to the same analysis, so with the same seed the chains
+    must agree closely.
+    """
+    config_cold = _make_inversion_input(
+        kappa_x="inner outer", nxout=2, nbc=0, sigma_qx=0.02,
+        sigma2_exc_prior={"pdf": "beta", "shape": 2.0, "scale": 2.0},
+    )
+    assert config_cold.warm_start is False
+    config = dataclasses.replace(config_cold, warm_start=True)
+
+    outputs_warm = augmented_ffbs_mxkf_gibbs_multi_slice(config, rng=np.random.default_rng(7))
+    outputs_cold = augmented_ffbs_mxkf_gibbs_multi_slice(config_cold, rng=np.random.default_rng(7))
+
+    assert np.all(np.isfinite(outputs_cold[0]))
+    np.testing.assert_allclose(outputs_cold[0], outputs_warm[0], rtol=0.05)

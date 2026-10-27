@@ -71,6 +71,7 @@ class InversionInput:
     tau_resid_prior: dict | None = None
     tau_resid_max: float | None = 200
     analysis_form: str = "information"
+    warm_start: bool = False
 
 
 def bristau_monthly_dictionaries(config: MessyInput) -> InversionInput:
@@ -574,6 +575,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
             Hz_dic_raw=config.Hz_dic,
             print_chain_progress=print_chain_progress,
             analysis_form=analysis_form,
+            warm_start=config.warm_start,
         )
 
         sampler_inputs = iterative_augmented_mxkf(filter_inputs)
