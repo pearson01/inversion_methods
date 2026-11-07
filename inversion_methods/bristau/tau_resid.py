@@ -398,7 +398,12 @@ def sample_tau(tau_current, tau_max, standardised, prev_standardised, has_prev, 
 
     logp = lambda s: tau_log_posterior(s, tau_max, standardised, prev_standardised, has_prev, gap, alpha_prior, beta_prior)
 
-    logy = logp(s_current) - rng.exponential(1)
+    logp_current = logp(s_current)
+    if not np.isfinite(logp_current):
+        # A NaN/inf here would make the shrinkage loop below run forever.
+        raise FloatingPointError(f"tau log posterior is {logp_current} at the current value {tau_current}; the standardised residuals are probably non-finite")
+
+    logy = logp_current - rng.exponential(1)
 
     u = rng.uniform()
     L = s_current - w * u

@@ -111,6 +111,15 @@ class InversionParameters:
     #               laplace_mean_correction in bristau_filter_sampler.py.
     mean_correction: bool = False
 
+    # mean_correction_max_sd (float | None): with mean_correction=True, only
+    #               states whose analysis sd (log-space sd for lognormal
+    #               states) is below this get the correction; wider states
+    #               keep the mode. The expansion behind the correction is only
+    #               valid for narrow posteriors and overshoots badly (and can
+    #               run away with sigma_qx) for log-sd ~2. None disables the
+    #               gate. Default 0.7.
+    mean_correction_max_sd: float | None = 0.7
+
     # --- Multi-chain convergence checking (see multichain.py) -----------
     # nchain (int): Number of independent copies of the Gibbs sampler to run.
     #               1 (the default) just runs the sampler once. Set to e.g. 4 to also get a
@@ -255,6 +264,7 @@ def bristau_function(config: InversionParameters):
         gn_tol=config.gn_tol,
         gn_max_inner_iters=config.gn_max_inner_iters,
         mean_correction=config.mean_correction,
+        mean_correction_max_sd=config.mean_correction_max_sd,
         )
 
     end_data = time.time()

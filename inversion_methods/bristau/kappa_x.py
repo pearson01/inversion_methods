@@ -238,7 +238,12 @@ def slice_sample_kappa(log_density, kappa_current, kappa_max, w=0.05, m=100, rng
     if rng is None:
         rng = np.random
 
-    logy = log_density(kappa_current) + np.log(rng.uniform())
+    logp_current = log_density(kappa_current)
+    if np.isnan(logp_current):
+        # NaN would make the shrinkage loop below run forever.
+        raise FloatingPointError(f"kappa log density is NaN at the current value {kappa_current}; the state path is probably non-finite")
+
+    logy = logp_current + np.log(rng.uniform())
 
     u = rng.uniform()
     L = kappa_current - w * u

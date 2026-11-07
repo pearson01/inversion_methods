@@ -221,7 +221,13 @@ def sample_sigma2_exc(sigma2_exc_current, r, sigma_obs, alpha_prior, beta_prior,
 
     logp = lambda s: sigma2_exc_log_posterior(s, r, sigma_obs, alpha_prior, beta_prior, sigma2_exc_max, tau, prev_index_flat, gap_flat)
 
-    logy = logp(s_current) - rng.exponential(1)
+    logp_current = logp(s_current)
+    if not np.isfinite(logp_current):
+        # A NaN/inf here (e.g. from non-finite residuals) would make the
+        # shrinkage loop below run forever, since no proposal can beat it.
+        raise FloatingPointError(f"sigma2_exc log posterior is {logp_current} at the current value {sigma2_exc_current}; the state residuals are probably non-finite")
+
+    logy = logp_current - rng.exponential(1)
 
     # initial bracket
     u = rng.uniform()

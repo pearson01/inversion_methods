@@ -42,6 +42,7 @@ class amxkf_inputs:
     gn_tol: float | None = None
     gn_max_inner_iters: int = 10
     mean_correction: bool = False
+    mean_correction_max_sd: float | None = 0.7
 
 
 @dataclass
@@ -656,7 +657,7 @@ def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, r
     return za_mu, Pa, Pf_chol, converged, n_steps, final_decrease
 
 
-def laplace_mean_correction(za_mu, Pa, G, g, xprior, bcprior, rprior, nbasis, nbc, nr):
+def laplace_mean_correction(za_mu, Pa, G, g, xprior, bcprior, rprior, nbasis, nbc, nr, max_sd=None):
     """
     Shift from the analysis mode towards the analysis mean, from the third
     derivatives of the log posterior (first-order Laplace mean correction).
@@ -694,6 +695,15 @@ def laplace_mean_correction(za_mu, Pa, G, g, xprior, bcprior, rprior, nbasis, nb
         Priors, used to find which blocks are lognormal.
     nbasis, nbc, nr : int
         Block sizes; nbc may be None or 0.
+    max_sd : float or None
+        If given, states whose analysis sd sqrt(Pa_ii) (log-space sd for
+        lognormal states) is not below max_sd get no shift and keep the
+        mode. The expansion assumes the log posterior is close to quadratic
+        within about one sd of the mode. For wide states (log-sd ~2, e.g.
+        when sigma_qx is large) it overshoots the true mean shift several
+        times over, and through the sigma_qx update this can run away until
+        exp overflows. In the kappa05 identical-twin harness all states have
+        log-sd <= 0.58, so a gate of 0.7 leaves the result unchanged there.
 
     Returns
     -------
@@ -716,7 +726,12 @@ def laplace_mean_correction(za_mu, Pa, G, g, xprior, bcprior, rprior, nbasis, nb
 
     c = v * r * dPa - 2.0 * v * ((G * Pa) @ w) - w * (G @ (v * dPa))
 
-    return 0.5 * Pa @ c
+    delta = 0.5 * Pa @ c
+
+    if max_sd is not None:
+        delta = np.where(np.sqrt(dPa) < max_sd, delta, 0.0)
+
+    return delta
 
 
 def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
@@ -810,7 +825,7 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
         # mean (see laplace_mean_correction) before it is used by the next
         # forecast and by the backward sampler. Pa is left unchanged.
         if config.mean_correction:
-            za_mu[t] = za_mu[t] + laplace_mean_correction(za_mu[t], Pa[t], G_list[t], g_list[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr)
+            za_mu[t] = za_mu[t] + laplace_mean_correction(za_mu[t], Pa[t], G_list[t], g_list[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr, max_sd=config.mean_correction_max_sd)
 
         gn_seconds += time.perf_counter() - gn_start
 

@@ -77,6 +77,7 @@ class InversionInput:
     gn_tol: float | None = None
     gn_max_inner_iters: int = 10
     mean_correction: bool = False
+    mean_correction_max_sd: float | None = 0.7
 
 
 def bristau_monthly_dictionaries(config: MessyInput) -> InversionInput:
@@ -640,6 +641,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
             gn_tol=config.gn_tol,
             gn_max_inner_iters=config.gn_max_inner_iters,
             mean_correction=config.mean_correction,
+            mean_correction_max_sd=config.mean_correction_max_sd,
         )
 
         sampler_inputs = iterative_augmented_mxkf(filter_inputs)

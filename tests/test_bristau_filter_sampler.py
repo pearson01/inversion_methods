@@ -505,3 +505,29 @@ def test_mean_correction_flag_has_no_effect_with_normal_priors():
     on_inputs.xprior = normal; on_inputs.rprior = normal; on_inputs.mean_correction = True
 
     np.testing.assert_allclose(iterative_augmented_mxkf(on_inputs).za_mu, iterative_augmented_mxkf(off_inputs).za_mu)
+
+
+def test_laplace_mean_correction_max_sd_gates_wide_states_only():
+    u, P, G, g, priors, nbasis, nbc, nr = _mixed_observation_problem()
+    full = laplace_mean_correction(u, P, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr)
+    sd = np.sqrt(np.diag(P))
+    thr = np.median(sd)
+    gated = laplace_mean_correction(u, P, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr, max_sd=thr)
+
+    narrow = sd < thr
+    assert narrow.any() and (~narrow).any()
+    np.testing.assert_array_equal(gated[narrow], full[narrow])
+    np.testing.assert_array_equal(gated[~narrow], 0.0)
+
+    wide_open = laplace_mean_correction(u, P, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr, max_sd=1e9)
+    np.testing.assert_array_equal(wide_open, full)
+
+
+def test_mean_correction_max_sd_is_passed_through_the_filter():
+    ungated = _make_amxkf_inputs_no_bc(); ungated.mean_correction = True; ungated.mean_correction_max_sd = None
+    closed = _make_amxkf_inputs_no_bc(); closed.mean_correction = True; closed.mean_correction_max_sd = 0.0
+    off = _make_amxkf_inputs_no_bc()
+
+    # a zero threshold gates every state, so the filter reduces to the plain mode filter
+    np.testing.assert_array_equal(iterative_augmented_mxkf(closed).za_mu, iterative_augmented_mxkf(off).za_mu)
+    assert not np.allclose(iterative_augmented_mxkf(ungated).za_mu, iterative_augmented_mxkf(off).za_mu)

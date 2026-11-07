@@ -210,3 +210,9 @@ def test_sample_sigma2_exc_ar1_recovers_variance_from_correlated_residuals():
         current = sample_sigma2_exc(current, residuals, np.zeros(n), 1.0, 1.0, 100.0, tau, prev_index, gap, rng=rng)
         draws.append(current)
     assert abs(np.median(draws) - true_var) < 1.5
+
+
+def test_sample_sigma2_exc_raises_on_non_finite_residuals_instead_of_hanging():
+    residuals = np.ones(50); residuals[3] = np.nan
+    with pytest.raises(FloatingPointError):
+        sample_sigma2_exc(10.0, residuals, np.zeros(50), 1.0, 1.0, 100.0, *_iid_ar1_args(50), rng=np.random.default_rng(0))

@@ -245,3 +245,9 @@ def test_sample_kappa_recovers_true_persistence():
 
     assert np.all((draws > 0) & (draws < 0.995))
     assert abs(np.mean(draws) - true_kappa) < 0.15
+
+
+def test_slice_sample_kappa_raises_on_nan_density_instead_of_hanging():
+    from inversion_methods.bristau.kappa_x import slice_sample_kappa
+    with pytest.raises(FloatingPointError):
+        slice_sample_kappa(lambda k: np.nan, 0.5, 0.99, rng=np.random.default_rng(0))

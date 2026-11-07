@@ -336,3 +336,10 @@ def test_match_numba_threads_to_blas_ignores_unparseable_omp_num_threads(monkeyp
     monkeypatch.setenv("OMP_NUM_THREADS", "4,2")
 
     assert match_numba_threads_to_blas() == before
+
+
+def test_sample_tau_raises_on_non_finite_residuals_instead_of_hanging():
+    n = 50
+    standardised = np.ones(n); standardised[5] = np.nan
+    with pytest.raises(FloatingPointError):
+        sample_tau(5.0, 100.0, standardised, np.ones(n), np.ones(n, dtype=bool), np.ones(n), 1.0, 1.0, rng=np.random.default_rng(0))
