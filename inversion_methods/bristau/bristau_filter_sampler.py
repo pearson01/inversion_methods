@@ -697,8 +697,15 @@ def laplace_mean_correction(za_mu, Pa, G, g, xprior, bcprior, rprior, nbasis, nb
         Block sizes; nbc may be None or 0.
     max_sd : float or None
         If given, states whose analysis sd sqrt(Pa_ii) (log-space sd for
-        lognormal states) is not below max_sd get no shift and keep the
-        mode. The expansion assumes the log posterior is close to quadratic
+        lognormal states) is not below max_sd are treated as having no skew:
+        they get no shift and keep the mode, and c is built with their rows
+        and columns of Pa removed, so they don't shift correlated narrow
+        states either. (Gating only the output, in the zero_jumps OSSE the
+        narrow r_in state collected a large drift from the wide x states and
+        collapsed from 0.34 to 0.02; zeroing only the wide states' own c
+        entries still let their variances leak in through the narrow states'
+        cross terms.) With no wide states this equals the ungated
+        correction. The expansion assumes the log posterior is close to quadratic
         within about one sd of the mode. For wide states (log-sd ~2, e.g.
         when sigma_qx is large) it overshoots the true mean shift several
         times over, and through the sigma_qx update this can run away until
@@ -724,14 +731,22 @@ def laplace_mean_correction(za_mu, Pa, G, g, xprior, bcprior, rprior, nbasis, nb
     r = g - G @ z
     dPa = np.diag(Pa)
 
-    c = v * r * dPa - 2.0 * v * ((G * Pa) @ w) - w * (G @ (v * dPa))
+    if max_sd is None:
+        c = v * r * dPa - 2.0 * v * ((G * Pa) @ w) - w * (G @ (v * dPa))
+        return 0.5 * Pa @ c
 
-    delta = 0.5 * Pa @ c
+    # Wide states contribute no third-order terms at all: c is built as if
+    # their variance were zero (wide rows/columns of Pa removed), so neither
+    # their own skew term nor their variances inside narrow states' terms
+    # (e.g. G_jk x_k Pa_kk) can shift anything, including the r states,
+    # which pool many cells. Wide states themselves keep the mode.
+    wide = np.sqrt(dPa) >= max_sd
+    Pn = np.where(wide[:, None] | wide[None, :], 0.0, Pa)
+    dPn = np.diag(Pn)
+    c = v * r * dPn - 2.0 * v * ((G * Pn) @ w) - w * (G @ (v * dPn))
+    delta = 0.5 * Pa @ np.where(wide, 0.0, c)
 
-    if max_sd is not None:
-        delta = np.where(np.sqrt(dPa) < max_sd, delta, 0.0)
-
-    return delta
+    return np.where(wide, 0.0, delta)
 
 
 def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:

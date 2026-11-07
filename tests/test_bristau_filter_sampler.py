@@ -516,8 +516,13 @@ def test_laplace_mean_correction_max_sd_gates_wide_states_only():
 
     narrow = sd < thr
     assert narrow.any() and (~narrow).any()
-    np.testing.assert_array_equal(gated[narrow], full[narrow])
+    # Gating = the ungated correction with the wide states' rows/columns of P
+    # removed: wide states keep the mode and contribute no third-order terms
+    Pn = np.where(narrow[:, None] & narrow[None, :], P, 0.0)
+    expected = laplace_mean_correction(u, Pn, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr)
+    np.testing.assert_allclose(gated, expected, rtol=1e-12, atol=1e-14)
     np.testing.assert_array_equal(gated[~narrow], 0.0)
+    assert not np.allclose(gated[narrow], full[narrow])  # the wide states' terms were actually removed
 
     wide_open = laplace_mean_correction(u, P, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr, max_sd=1e9)
     np.testing.assert_array_equal(wide_open, full)
