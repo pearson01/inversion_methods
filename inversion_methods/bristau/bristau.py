@@ -89,6 +89,19 @@ class InversionParameters:
     #               the previous iteration's analysis mean.
     warm_start: bool = False
 
+    # gn_stopping_rule (str): When each period's Gauss-Newton analysis update
+    #               stops. "cost" (default) stops once one more step would
+    #               lower the analysis cost J (-2 log posterior) by less
+    #               than gn_tol; "step" stops once every component of the
+    #               step is smaller than gn_tol.
+    # gn_tol (float / optional): Tolerance for gn_stopping_rule. None (the
+    #               default) uses 0.1 for "cost" and 0.01 for "step".
+    # gn_max_inner_iters (int): Maximum Gauss-Newton iterations per period
+    #               in each analysis update. Default 10.
+    gn_stopping_rule: str = "cost"
+    gn_tol: float | None = None
+    gn_max_inner_iters: int = 10
+
     # --- Multi-chain convergence checking (see multichain.py) -----------
     # nchain (int): Number of independent copies of the Gibbs sampler to run.
     #               1 (the default) just runs the sampler once. Set to e.g. 4 to also get a
@@ -229,6 +242,9 @@ def bristau_function(config: InversionParameters):
         tau_resid_max=config.tau_resid_max,
         analysis_form=config.analysis_form,
         warm_start=config.warm_start,
+        gn_stopping_rule=config.gn_stopping_rule,
+        gn_tol=config.gn_tol,
+        gn_max_inner_iters=config.gn_max_inner_iters,
         )
 
     end_data = time.time()
@@ -266,6 +282,8 @@ def bristau_function(config: InversionParameters):
     kappa_x_trace_labels,
     tau_trace,
     tau_trace_labels,
+    gn_steps_trace,
+    gn_decrease_trace,
     ) = gibbs_output
 
 
@@ -312,6 +330,8 @@ def bristau_function(config: InversionParameters):
                                           inner_group_id=inner_group_id,
                                           tau_trace=tau_trace,
                                           tau_trace_labels=tau_trace_labels,
+                                          gn_steps_trace=gn_steps_trace,
+                                          gn_decrease_trace=gn_decrease_trace,
                                           convergence_report=convergence_report,
                                           )
 

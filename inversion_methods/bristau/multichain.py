@@ -85,7 +85,7 @@ def _summarise_chain_output(gibbs_output):
     """
     (xtrace, _bctrace, _rtrace, var_exc_trace, sigma2_qx_trace,
      kappa_x_trace, _sigma2_qx_labels, _kappa_x_labels, tau_trace,
-     _tau_labels) = gibbs_output
+     _tau_labels, _gn_steps_trace, _gn_decrease_trace) = gibbs_output
 
     return {
         "sigma2_exc": var_exc_trace,

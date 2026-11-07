@@ -12,7 +12,8 @@ from inversion_methods.bristau.bristau_filter_sampler import (
     augmented_backward_sampler,
     amxkf_inputs,
     _analysis_cost_change,
-    _backtracking_line_search,
+    _gauss_newton_target,
+    _predicted_cost_decrease,
 )
 
 
@@ -102,7 +103,7 @@ def test_iterative_analysis_update_matches_closed_form_linear_kalman_filter():
     G = H.T @ (r_inv[:, None] * H)
     g = H.T @ (r_inv * Y)
 
-    za_mu, Pa, _L, converged = iterative_analysis_update(
+    za_mu, Pa, _L, converged, *_ = iterative_analysis_update(
         zf_mu, za_mu_current=zf_mu.copy(), G=G, g=g, Pf=Pf,
         xprior=xprior, bcprior=None, rprior=rprior, nbasis=nbasis, nbc=nbc, nr=nr,
     )
@@ -139,7 +140,7 @@ def _make_amxkf_inputs_no_bc(nperiod=3, nbasis=3, nxout=1, nr=2, ny_per_period=8
         siteindicator_dic=siteindicator_dic, nbasis=nbasis, zprior_mus=np.zeros(nz),
         zprior_sigma2s=np.full(nz, 1.0), forecast_noise=np.full(nz, 0.01), nperiod=nperiod,
         sigma2_exc=0.01, kappa_x_vector=np.array([0.5, 0.5]), xprior=xprior, bcprior=None,
-        rprior=rprior, nbc=None, nr=nr, nxout=nxout, iteration=0, print_chain_progress=False,
+        rprior=rprior, nbc=None, nr=nr, nxout=nxout,
     )
 
 
@@ -192,8 +193,8 @@ def test_iterative_analysis_update_information_and_woodbury_forms_agree(seed):
     """
     problem = _lognormal_analysis_problem(seed=seed)
 
-    za_info, Pa_info, L_info, conv_info = iterative_analysis_update(**problem, analysis_form="information")
-    za_wood, Pa_wood, L_wood, conv_wood = iterative_analysis_update(**problem, analysis_form="woodbury")
+    za_info, Pa_info, L_info, conv_info, *_ = iterative_analysis_update(**problem, analysis_form="information")
+    za_wood, Pa_wood, L_wood, conv_wood, *_ = iterative_analysis_update(**problem, analysis_form="woodbury")
 
     np.testing.assert_allclose(za_info, za_wood, rtol=1e-10, atol=1e-12)
     np.testing.assert_allclose(Pa_info, Pa_wood, rtol=1e-10, atol=1e-12)
@@ -278,7 +279,7 @@ def test_iterative_analysis_update_reaches_kalman_analysis_from_overfitted_start
     x_least_squares = np.linalg.lstsq(H[:, :nbasis], Y, rcond=None)[0]
     overfitted_start = np.r_[x_least_squares, zf_mu[nbasis:]]
 
-    za_mu, Pa, _L, converged = iterative_analysis_update(
+    za_mu, Pa, _L, converged, *_ = iterative_analysis_update(
         zf_mu, za_mu_current=overfitted_start, G=G, g=g, Pf=Pf,
         xprior=prior, bcprior=None, rprior=prior, nbasis=nbasis, nbc=nbc, nr=nr,
         analysis_form=analysis_form,
@@ -292,9 +293,10 @@ def test_iterative_analysis_update_reaches_kalman_analysis_from_overfitted_start
     np.testing.assert_allclose(Pa, Pa_exact, rtol=1e-8, atol=1e-12)
 
 
+@pytest.mark.parametrize("stopping_rule, tol", [("step", 1e-6), ("cost", 1e-12)])
 @pytest.mark.parametrize("analysis_form", ["information", "woodbury"])
 @pytest.mark.parametrize("start", ["forecast", "overfitted", "far"])
-def test_iterative_analysis_update_finds_minimum_of_cost_with_lognormal_priors(start, analysis_form):
+def test_iterative_analysis_update_finds_minimum_of_cost_with_lognormal_priors(start, analysis_form, stopping_rule, tol):
     problem, Y, H, r_inv = _lognormal_problem_and_observations(seed=41)
     zf_mu, Pf = problem["zf_mu"], problem["Pf"]
 
@@ -314,7 +316,7 @@ def test_iterative_analysis_update_finds_minimum_of_cost_with_lognormal_priors(s
 
     # Tight tolerance and plenty of iterations: this tests where the loop
     # ends up, not how quickly it gets there.
-    za_mu, _Pa, _L, converged = iterative_analysis_update(**problem, max_inner_iters=50, tol=1e-6, analysis_form=analysis_form)
+    za_mu, _Pa, _L, converged, *_ = iterative_analysis_update(**problem, max_inner_iters=50, tol=tol, analysis_form=analysis_form, stopping_rule=stopping_rule)
 
     assert converged
     np.testing.assert_allclose(za_mu, reference, atol=1e-5)
@@ -324,9 +326,10 @@ def test_iterative_analysis_update_reports_not_converged_when_out_of_iterations(
     problem = _lognormal_analysis_problem(seed=41)
     problem["za_mu_current"] = problem["zf_mu"] + 1.0
 
-    *_, converged = iterative_analysis_update(**problem, max_inner_iters=1)
+    _za_mu, _Pa, _L, converged, n_steps, _decrease = iterative_analysis_update(**problem, max_inner_iters=1)
 
     assert not converged
+    assert n_steps == 1
 
 
 def test_analysis_cost_change_matches_direct_evaluation():
@@ -339,23 +342,46 @@ def test_analysis_cost_change_matches_direct_evaluation():
 
     # All blocks are lognormal and there are no boundary conditions, so
     # state_vector_mu_transform is exp().
-    change = _analysis_cost_change(u_new, u_old, zf_mu, np.linalg.cholesky(Pf), G, g, np.exp)
+    change = _analysis_cost_change(u_new, np.exp(u_new), u_old, np.exp(u_old), zf_mu, np.linalg.cholesky(Pf), G, g)
 
     expected = _analysis_cost(u_new, zf_mu, Pf, Y, H, r_inv) - _analysis_cost(u_old, zf_mu, Pf, Y, H, r_inv)
 
     np.testing.assert_allclose(change, expected, rtol=1e-9)
 
 
-def test_backtracking_line_search_halves_step_until_cost_decreases():
-    # The cost only goes down for steps shorter than 0.3 in every component.
-    cost_change = lambda u_new, u_old: -1.0 if np.max(np.abs(u_new - u_old)) < 0.3 else 1.0
+@pytest.mark.parametrize("analysis_form", ["information", "woodbury"])
+def test_predicted_cost_decrease_matches_linearised_cost(analysis_form):
+    """
+    The predicted decrease is the drop in J, with z linearised about u,
+    from u to the Gauss-Newton target.
+    """
+    problem, Y, H, r_inv = _lognormal_problem_and_observations(seed=5)
+    zf_mu, Pf, G, g = problem["zf_mu"], problem["Pf"], problem["G"], problem["g"]
+    Pf_chol = np.linalg.cholesky(Pf)
+    Pf_inv = np.linalg.inv(Pf) if analysis_form == "information" else None
 
-    step = _backtracking_line_search(np.zeros(3), np.ones(3), cost_change)
+    u = zf_mu + np.random.default_rng(6).normal(scale=0.3, size=zf_mu.size)
+    # All blocks are lognormal, so z = exp(u) and its Jacobian Wb = z.
+    z = np.exp(u)
+    target, _ = _gauss_newton_target(u, z, z, zf_mu, G, g, Pf_chol, Pf_inv, analysis_form)
 
-    np.testing.assert_allclose(step, np.full(3, 0.25))
+    # Linearised J at u (where z(u) is exact) and at the target.
+    residual_u = Y - H @ z
+    cost_u = (u - zf_mu) @ np.linalg.solve(Pf, u - zf_mu) + residual_u @ (r_inv * residual_u)
+    residual_target = Y - H @ (z + z * (target - u))
+    cost_target = (target - zf_mu) @ np.linalg.solve(Pf, target - zf_mu) + residual_target @ (r_inv * residual_target)
+
+    decrease = _predicted_cost_decrease(target - u, z, G, Pf_chol, Pf_inv)
+
+    np.testing.assert_allclose(decrease, cost_u - cost_target, rtol=1e-8)
 
 
-def test_backtracking_line_search_returns_none_when_no_step_lowers_cost():
-    cost_never_decreases = lambda u_new, u_old: 1.0
+def test_iterative_analysis_update_cost_rule_reports_decrease_below_tolerance():
+    problem = _lognormal_analysis_problem(seed=41)
+    problem["za_mu_current"] = problem["zf_mu"] + 1.0
 
-    assert _backtracking_line_search(np.zeros(3), np.ones(3), cost_never_decreases) is None
+    *_, converged, n_steps, final_decrease = iterative_analysis_update(**problem)
+
+    assert converged
+    assert 1 <= n_steps <= 10
+    assert final_decrease < 0.1

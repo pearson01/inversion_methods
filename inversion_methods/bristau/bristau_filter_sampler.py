@@ -1,4 +1,5 @@
 import re
+import time
 from pathlib import Path
 import warnings
 
@@ -29,16 +30,17 @@ class amxkf_inputs:
     rprior: dict
     nxout: int
     nr: int
-    iteration: int
     kappa_r: float = 0.0
     nbc: int | None = None
     za_mu_warmstart: np.ndarray | None = None
     err_var_dic: dict | None = None
     Y_dic_raw: dict | None = None
     Hz_dic_raw: dict | None = None
-    print_chain_progress: bool = True
     analysis_form: str = "information"
     warm_start: bool = False
+    gn_stopping_rule: str = "cost"
+    gn_tol: float | None = None
+    gn_max_inner_iters: int = 10
 
 
 @dataclass
@@ -61,6 +63,12 @@ class abs_inputs:
     kappa_xin: float
     kappa_xout: float | None
     kappa_r: float = 0.0
+    # Gauss-Newton diagnostics from the forward filter, one entry per period
+    # (see iterative_analysis_update), and the time spent in it.
+    gn_converged: np.ndarray | None = None
+    gn_steps: np.ndarray | None = None
+    gn_decrease: np.ndarray | None = None
+    gn_seconds: float = 0.0
 
 
 
@@ -329,7 +337,7 @@ def augmented_forecast_model(
     return zf_mu, Pf_aug
 
 
-def _analysis_cost_change(u_new, u_old, zf_mu, Pf_chol, G, g, to_natural_space):
+def _analysis_cost_change(u_new, z_new, u_old, z_old, zf_mu, Pf_chol, G, g):
     """
     Change in the analysis cost function, J(u_new) - J(u_old).
 
@@ -357,20 +365,18 @@ def _analysis_cost_change(u_new, u_old, zf_mu, Pf_chol, G, g, to_natural_space):
     ----------
     u_new, u_old : numpy.ndarray
         The two states, in optimisation space.
+    z_new, z_old : numpy.ndarray
+        The same two states in natural space, z(u_new) and z(u_old).
     zf_mu : numpy.ndarray
         Forecast mean, in optimisation space.
     Pf_chol : numpy.ndarray
         Lower Cholesky factor of the forecast covariance Pf.
     G, g : numpy.ndarray
         ``H' R^-1 H`` and ``H' R^-1 Y`` for this period.
-    to_natural_space : callable
-        Maps an optimisation-space state u to the natural-space state z(u).
     """
     forecast_term_new = np.sum(solve_triangular(Pf_chol, u_new - zf_mu, lower=True) ** 2)
     forecast_term_old = np.sum(solve_triangular(Pf_chol, u_old - zf_mu, lower=True) ** 2)
 
-    z_new = to_natural_space(u_new)
-    z_old = to_natural_space(u_old)
     observation_term_change = (z_new - z_old) @ (G @ (z_new + z_old) - 2.0 * g)
 
     return (forecast_term_new - forecast_term_old) + observation_term_change
@@ -407,29 +413,51 @@ def _anderson_step(za_mu, gn_step, previous_za_mu, previous_gn_step):
     return step
 
 
-def _backtracking_line_search(za_mu, gn_step, cost_change, max_tries=10):
+def _gauss_newton_target(u, z_lin, Wb, zf_mu, G, g, Pf_chol, Pf_inv, analysis_form):
     """
-    Return the longest of gn_step, gn_step / 2, gn_step / 4, ... (max_tries
-    candidates, down to gn_step / 512 by default) that does not increase the
-    analysis cost, or None if none of them does.
+    Minimiser of the analysis cost J with z linearised about u,
+    z(v) ~ z_lin + diag(Wb) (v - u), where z_lin = z(u) and Wb is its
+    Jacobian from build_Wb. This is an ordinary Kalman update.
 
-    The Gauss-Newton step points downhill on the analysis cost, so a short
-    enough step always lowers it unless za_mu is already at the minimum.
-
-    cost_change(u_new, u_old) must return J(u_new) - J(u_old).
+    Also returns the factorisation from the gain calculation, from which
+    the analysis covariance at u is formed.
     """
-    step = gn_step
+    # H.T @ diag(r_inv) @ d for the linearised innovation
+    #   d = Y - H @ z_lin - H @ diag(Wb) @ (zf_mu - u),
+    # written with the precomputed G and g so that the (ny, nz)
+    # observation operator is never needed here.
+    h = g - G @ (z_lin + Wb * (zf_mu - u))
 
-    for _ in range(max_tries):
-        if cost_change(za_mu + step, za_mu) <= 0:
-            return step
+    if analysis_form == "information":
+        Kd, gain_factor = kalman_gain_information_from_gram(Pf_inv, G, Wb, h)
+    else:
+        Kd, gain_factor = kalman_gain_woodbury_from_gram(Pf_chol, G, Wb, h)
 
-        step = 0.5 * step
-
-    return None
+    return zf_mu + Kd, gain_factor
 
 
-def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, rprior, nbasis, nbc, nr, max_inner_iters=10, tol=1e-02, analysis_form="information"):
+def _predicted_cost_decrease(gn_step, Wb, G, Pf_chol, Pf_inv):
+    """
+    Decrease in the linearised analysis cost from taking the full
+    Gauss-Newton step, gn_step' A gn_step with A = Pf^-1 + diag(Wb) G diag(Wb)
+    the linearised posterior precision.
+
+    This is the squared length of the remaining step measured in posterior
+    standard deviations: any linear combination a' u of the state is within
+    sqrt(decrease) posterior standard deviations of its linearised optimum.
+    Pf_inv is used when given (information form), otherwise Pf_chol.
+    """
+    if Pf_inv is not None:
+        forecast_term = gn_step @ (Pf_inv @ gn_step)
+    else:
+        forecast_term = np.sum(solve_triangular(Pf_chol, gn_step, lower=True) ** 2)
+
+    weighted_step = Wb * gn_step
+
+    return forecast_term + weighted_step @ (G @ weighted_step)
+
+
+def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, rprior, nbasis, nbc, nr, max_inner_iters=10, tol=None, analysis_form="information", stopping_rule="cost"):
 
     """
     Analysis update for one filter time step, iterated with Gauss-Newton to
@@ -450,9 +478,15 @@ def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, r
     Each iteration:
 
     1. Compute the Gauss-Newton target from the current estimate.
-    2. If the Gauss-Newton step is smaller than ``tol`` in every component,
-       the estimate is a fixed point of the iteration, i.e. the minimum of J:
-       move to the target and stop, converged.
+    2. Check for convergence, by ``stopping_rule``:
+
+       - "cost" (default): stop once taking the Gauss-Newton step would
+         lower the linearised J by less than ``tol``. Move to the target
+         only if that does not increase J, as a long step along a direction
+         the data barely constrain can still be a poor linearisation.
+       - "step": stop once the Gauss-Newton step is smaller than ``tol`` in
+         every component, and move to the target.
+
     3. Otherwise, move to a new estimate, but only if it lowers J. From the
        second iteration onwards a first-order Anderson-accelerated step is
        tried first. If that is unavailable or does not lower J, the
@@ -492,10 +526,15 @@ def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, r
     nr : int
         Number of relaxation terms. Currently either 1 or 2.
     max_inner_iters : int, optional
-        Maximum number of Gauss-Newton iterations. Default is 5.
+        Maximum number of Gauss-Newton iterations. Default is 10.
     tol : float, optional
-        Convergence tolerance on the largest component of the Gauss-Newton
-        step. Default is ``1e-2``.
+        Convergence tolerance. For stopping_rule="cost", the predicted
+        decrease in J (default ``0.1``; J is -2 log posterior, so any linear
+        combination of the state is then within sqrt(0.1) ~ 0.3 posterior
+        standard deviations of its optimum). For stopping_rule="step", the
+        largest component of the Gauss-Newton step (default ``1e-2``).
+    stopping_rule : {"cost", "step"}, optional
+        Convergence test; see step 2 above. Default is "cost".
     analysis_form : {"information", "woodbury"}, optional
         How the Kalman gain and analysis covariance are computed. Both are
         algebraically identical. "information" (the default) factorises
@@ -513,53 +552,34 @@ def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, r
     Pf_chol : numpy.ndarray
         Lower Cholesky factor of Pf (reused by the backward sampler).
     converged : bool
-        True if the Gauss-Newton step fell below ``tol`` within
-        ``max_inner_iters`` iterations.
+        True if the convergence test was met within ``max_inner_iters``
+        iterations.
+    n_steps : int
+        Number of Gauss-Newton iterations used. When not converged, fewer
+        than ``max_inner_iters`` means no step lowered J.
+    final_decrease : float
+        Predicted decrease in J from one more Gauss-Newton step at the
+        returned mean, i.e. how far it is from the linearised optimum.
     """
+
+    if analysis_form not in ("information", "woodbury"):
+        raise ValueError(f"Unknown analysis_form: {analysis_form!r}. Expected 'information' or 'woodbury'.")
+
+    if stopping_rule not in ("cost", "step"):
+        raise ValueError(f"Unknown stopping_rule: {stopping_rule!r}. Expected 'cost' or 'step'.")
+
+    if tol is None:
+        tol = 0.1 if stopping_rule == "cost" else 1e-2
 
     Pf_chol, _, _ = _cholesky_with_repair(Pf)
 
-    if analysis_form == "information":
-        # Pf is fixed across the inner loop, so its inverse is formed once
-        # here and reused by every gain evaluation below.
-        Pf_inv = precision_from_cholesky(Pf_chol)
-        kalman_gain = lambda Wb, h: kalman_gain_information_from_gram(Pf_inv, G, Wb, h)
-        analysis_covariance = covariance_from_information_factor
-
-    elif analysis_form == "woodbury":
-        kalman_gain = lambda Wb, h: kalman_gain_woodbury_from_gram(Pf_chol, G, Wb, h)
-        analysis_covariance = lambda factor: covariance_from_woodbury_factor(Pf_chol, factor)
-
-    else:
-        raise ValueError(f"Unknown analysis_form: {analysis_form!r}. Expected 'information' or 'woodbury'.")
-
-    def to_natural_space(u):
-        return state_vector_mu_transform(u, xprior, bcprior, rprior, nbasis, nbc, nr)
-
-    def gauss_newton_target(u):
-        """
-        Minimiser of J with z linearised about u, z(v) ~ z(u) + diag(Wb) (v - u).
-        Also returns the factorisation from the gain calculation, from which
-        the analysis covariance at u is formed.
-        """
-        z_lin = to_natural_space(u)
-        Wb = build_Wb(z_lin, xprior, bcprior, rprior, nbasis, nbc)
-
-        # H.T @ diag(r_inv) @ d for the linearised innovation
-        #   d = Y - H @ z_lin - H @ diag(Wb) @ (zf_mu - u),
-        # written with the precomputed G and g so that the (ny, nz)
-        # observation operator is never needed here.
-        h = g - G @ (z_lin + Wb * (zf_mu - u))
-
-        Kd, gain_factor = kalman_gain(Wb, h)
-
-        return zf_mu + Kd, gain_factor
-
-    def cost_change(u_new, u_old):
-        return _analysis_cost_change(u_new, u_old, zf_mu, Pf_chol, G, g, to_natural_space)
+    # Pf is fixed across the inner loop, so the information form's Pf^-1 is
+    # formed once here and reused by every gain evaluation below.
+    Pf_inv = precision_from_cholesky(Pf_chol) if analysis_form == "information" else None
 
     za_mu = za_mu_current
     converged = False
+    n_steps = 0
 
     # The previous estimate and its Gauss-Newton step, for Anderson acceleration.
     previous_za_mu = None
@@ -567,26 +587,51 @@ def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, r
 
     for _ in range(max_inner_iters):
 
-        gn_target, _ = gauss_newton_target(za_mu)
+        n_steps += 1
+
+        # Linearise z(u) about the current estimate and solve the resulting
+        # linear-Gaussian problem.
+        z = state_vector_mu_transform(za_mu, xprior, bcprior, rprior, nbasis, nbc, nr)
+        Wb = build_Wb(z, xprior, bcprior, rprior, nbasis, nbc)
+        gn_target, _ = _gauss_newton_target(za_mu, z, Wb, zf_mu, G, g, Pf_chol, Pf_inv, analysis_form)
         gn_step = gn_target - za_mu
 
-        if np.max(np.abs(gn_step)) < tol:
+        if stopping_rule == "step" and np.max(np.abs(gn_step)) < tol:
             za_mu = gn_target
             converged = True
             break
 
-        # Try the Anderson-accelerated step first, keeping it only if it
-        # lowers J; otherwise fall back to a backtracked Gauss-Newton step.
-        step = None
+        if stopping_rule == "cost" and _predicted_cost_decrease(gn_step, Wb, G, Pf_chol, Pf_inv) < tol:
+            z_target = state_vector_mu_transform(gn_target, xprior, bcprior, rprior, nbasis, nbc, nr)
+
+            if _analysis_cost_change(gn_target, z_target, za_mu, z, zf_mu, Pf_chol, G, g) <= 0:
+                za_mu = gn_target
+
+            converged = True
+            break
+
+        # Candidate steps, in order of preference: the Anderson-accelerated
+        # step (from the second iteration onwards), then the Gauss-Newton
+        # step, halved up to 9 times. The first candidate that does not
+        # increase J is taken.
+        candidate_steps = []
 
         if previous_gn_step is not None:
-            step = _anderson_step(za_mu, gn_step, previous_za_mu, previous_gn_step)
+            anderson_step = _anderson_step(za_mu, gn_step, previous_za_mu, previous_gn_step)
+            if anderson_step is not None:
+                candidate_steps.append(anderson_step)
 
-            if step is not None and cost_change(za_mu + step, za_mu) > 0:
-                step = None
+        candidate_steps += [gn_step * 0.5**k for k in range(10)]
 
-        if step is None:
-            step = _backtracking_line_search(za_mu, gn_step, cost_change)
+        step = None
+
+        for candidate in candidate_steps:
+            u_new = za_mu + candidate
+            z_new = state_vector_mu_transform(u_new, xprior, bcprior, rprior, nbasis, nbc, nr)
+
+            if _analysis_cost_change(u_new, z_new, za_mu, z, zf_mu, Pf_chol, G, g) <= 0:
+                step = candidate
+                break
 
         if step is None:
             # No step lowers J. Stop here rather than move to a worse
@@ -597,10 +642,17 @@ def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, r
         za_mu = za_mu + step
 
     # Analysis covariance, from the linearisation at the returned mean.
-    _, gain_factor = gauss_newton_target(za_mu)
-    Pa = analysis_covariance(gain_factor)
+    z = state_vector_mu_transform(za_mu, xprior, bcprior, rprior, nbasis, nbc, nr)
+    Wb = build_Wb(z, xprior, bcprior, rprior, nbasis, nbc)
+    final_target, gain_factor = _gauss_newton_target(za_mu, z, Wb, zf_mu, G, g, Pf_chol, Pf_inv, analysis_form)
+    final_decrease = _predicted_cost_decrease(final_target - za_mu, Wb, G, Pf_chol, Pf_inv)
 
-    return za_mu, Pa, Pf_chol, converged
+    if analysis_form == "information":
+        Pa = covariance_from_information_factor(gain_factor)
+    else:
+        Pa = covariance_from_woodbury_factor(Pf_chol, gain_factor)
+
+    return za_mu, Pa, Pf_chol, converged, n_steps, final_decrease
 
 
 def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
@@ -666,7 +718,11 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
         g_list[t] = HTrinv @ Y_t
 
     za_mu_current = zf_mu.copy() if config.za_mu_warmstart is None else config.za_mu_warmstart.copy()
-    converge_count = 0
+
+    gn_converged = np.zeros(config.nperiod, dtype=bool)
+    gn_steps = np.zeros(config.nperiod, dtype=int)
+    gn_decrease = np.zeros(config.nperiod)
+    gn_seconds = 0.0
 
     for t in range(config.nperiod):
 
@@ -681,14 +737,12 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
         # warm_start=False (default): start every period from its forecast mean.
         za_mu_start = za_mu_current[t] if config.warm_start else zf_mu[t]
 
-        za_mu[t], Pa[t], Pf_chol[t], converged = iterative_analysis_update(zf_mu[t], za_mu_start, G_list[t], g_list[t], Pf[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr, analysis_form=config.analysis_form)
+        gn_start = time.perf_counter()
 
-        if converged:
-            converge_count += 1
-                
+        (za_mu[t], Pa[t], Pf_chol[t],
+         gn_converged[t], gn_steps[t], gn_decrease[t]) = iterative_analysis_update(zf_mu[t], za_mu_start, G_list[t], g_list[t], Pf[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr, max_inner_iters=config.gn_max_inner_iters, tol=config.gn_tol, analysis_form=config.analysis_form, stopping_rule=config.gn_stopping_rule)
 
-    if config.print_chain_progress and config.iteration % 50 == 0:
-        print(f"            {converge_count} convergences in {config.nperiod} MXKF time steps")
+        gn_seconds += time.perf_counter() - gn_start
 
     # The backward sampler computes residuals (Y_dic - Hz_dic @ z) purely as a
     # diagnostic fed to the sigma2_exc/sigma2_qx Gibbs updates. Those updates
@@ -717,6 +771,10 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
                          rprior=config.rprior,
                          nr=config.nr,
                          kappa_r=config.kappa_r,
+                         gn_converged=gn_converged,
+                         gn_steps=gn_steps,
+                         gn_decrease=gn_decrease,
+                         gn_seconds=gn_seconds,
                          )
 
 

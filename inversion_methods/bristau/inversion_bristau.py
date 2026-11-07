@@ -1,4 +1,5 @@
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +73,9 @@ class InversionInput:
     tau_resid_max: float | None = 200
     analysis_form: str = "information"
     warm_start: bool = False
+    gn_stopping_rule: str = "cost"
+    gn_tol: float | None = None
+    gn_max_inner_iters: int = 10
 
 
 def bristau_monthly_dictionaries(config: MessyInput) -> InversionInput:
@@ -195,6 +199,34 @@ def analysis_form_select(config):
     return analysis_form
 
 
+def gn_progress_message(sampler_inputs, period_labels, iteration_seconds, nworst=5):
+    """
+    Summary of one iteration's Gauss-Newton analysis updates (see
+    iterative_analysis_update): how many periods converged, the iterations
+    used, the predicted decrease in J left at the returned means, the time
+    spent, and the worst periods that did not converge.
+    """
+    converged = sampler_inputs.gn_converged
+    steps = sampler_inputs.gn_steps
+    decrease = sampler_inputs.gn_decrease
+
+    message = (
+        f"        Gauss-Newton: {converged.sum()}/{converged.size} periods converged"
+        f" | iterations mean {steps.mean():.1f}, max {steps.max()}"
+        f" | predicted dJ median {np.median(decrease):.3g}, max {decrease.max():.3g}"
+        f" | {sampler_inputs.gn_seconds:.2f} s of {iteration_seconds:.2f} s this iteration"
+    )
+
+    not_converged = np.flatnonzero(~converged)
+
+    if not_converged.size:
+        worst = not_converged[np.argsort(-decrease[not_converged])][:nworst]
+        worst_list = ", ".join(f"{period_labels[t]} (dJ {decrease[t]:.3g}, {steps[t]} iterations)" for t in worst)
+        message += f"\n            not converged, worst {worst.size}: {worst_list}"
+
+    return message
+
+
 def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, print_chain_progress=True, chain_index=0, nchain=1):
     """
     Run the augmented FFBS/MXKF Gibbs sampler.
@@ -220,7 +252,8 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
         When True (the default), this chain prints a one-off line at
         start-up giving its numba thread count, then the usual
         per-50-iteration progress lines (current hyperparameter values,
-        backward-sampled state summary, MXKF convergence count).
+        backward-sampled state summary, Gauss-Newton summary), and the
+        total Gauss-Newton time at the end.
         Set to False to run silently -- multichain.py does this for every
         chain except the one it keeps, so running several chains at once
         doesn't interleave nchain copies of the same progress output.
@@ -291,6 +324,15 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
 
     tau_trace_labels : list[str]
         Labels for the columns of tau_trace.
+
+    gn_steps_trace : ndarray
+        Gauss-Newton iterations used in each period's analysis update.
+        Shape: (retained_iterations, nperiod).
+
+    gn_decrease_trace : ndarray
+        Predicted decrease in the analysis cost from one more Gauss-Newton
+        step at each period's returned analysis mean. Shape:
+        (retained_iterations, nperiod).
     """
 
     # ------------------------------------------------------------------
@@ -440,6 +482,23 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
 
     tau_trace = np.zeros((config.iterations, n_tau_parameters), dtype=float,)
 
+    # Gauss-Newton diagnostics from the forward filter, per iteration and period.
+    gn_steps_trace = np.zeros((config.iterations, config.nperiod), dtype=np.int16,)
+
+    gn_decrease_trace = np.zeros((config.iterations, config.nperiod), dtype=np.float32,)
+
+    gn_seconds_total = 0.0
+    sampling_start = time.perf_counter()
+
+    # Month of each period, for the Gauss-Newton progress messages.
+    period_labels = []
+    for t in range(config.nperiod):
+        times = np.asarray(config.Ytime_dic[t])
+        if times.size and np.issubdtype(times.dtype, np.datetime64):
+            period_labels.append(str(times[0].astype("datetime64[M]")))
+        else:
+            period_labels.append(f"period {t}")
+
     za_mu_prev = None
 
     # ------------------------------------------------------------------
@@ -490,6 +549,8 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
     # ------------------------------------------------------------------
 
     for i in range(config.iterations):
+        iteration_start = time.perf_counter()
+
         if print_chain_progress and i % 50 == 0:
             print(
                 f"Iteration: {i}, sigma2_exc: {sigma2_exc_current}, sigma2_qx min/max: ({sigma2_qx_bf_current.min()}, {sigma2_qx_bf_current.max()}), kappa_x: ({kappa_x_vector_current}), tau_resid: {tau_current}", flush=True,)
@@ -501,13 +562,13 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
         sigma2_qxin_bf = sigma2_qx_bf_current[nxout:]
 
         xinprior_sigma2s = (sigma2_qxin_bf + sigma2_qr) / (1.0 - kappa_x_vector_current[-1]**2)
-        xinprior_sigma2s = np.minimum(xinprior_sigma2s, xprior_sigma**2,)
+        # xinprior_sigma2s = np.minimum(xinprior_sigma2s, xprior_sigma**2,)
 
         if nxout > 0:
             sigma2_qxout_bf = sigma2_qx_bf_current[:nxout]
 
             xoutprior_sigma2s = (sigma2_qxout_bf + sigma2_qr) / (1.0 - kappa_x_vector_current[0]**2)
-            xoutprior_sigma2s = np.minimum(xoutprior_sigma2s, xprior_sigma**2,)
+            # xoutprior_sigma2s = np.minimum(xoutprior_sigma2s, xprior_sigma**2,)
             xprior_sigma2s = np.concatenate((xoutprior_sigma2s, xinprior_sigma2s,))
             
         else:
@@ -567,20 +628,25 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
             nbc=config.nbc,
             nr=config.nr,
             nxout=nxout,
-            iteration=i,
             kappa_r=config.kappa_r,
             za_mu_warmstart=za_mu_prev,
             err_var_dic=err_var_dic,
             Y_dic_raw=config.Y_dic,
             Hz_dic_raw=config.Hz_dic,
-            print_chain_progress=print_chain_progress,
             analysis_form=analysis_form,
             warm_start=config.warm_start,
+            gn_stopping_rule=config.gn_stopping_rule,
+            gn_tol=config.gn_tol,
+            gn_max_inner_iters=config.gn_max_inner_iters,
         )
 
         sampler_inputs = iterative_augmented_mxkf(filter_inputs)
 
         za_mu_prev = sampler_inputs.za_mu
+
+        gn_steps_trace[i] = sampler_inputs.gn_steps
+        gn_decrease_trace[i] = sampler_inputs.gn_decrease
+        gn_seconds_total += sampler_inputs.gn_seconds
 
         # --------------------------------------------------------------
         # Backward sampling
@@ -698,6 +764,13 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
 
         kappa_x_trace[i] = kappa_x_vector_current
 
+        if print_chain_progress and i % 50 == 0:
+            print(gn_progress_message(sampler_inputs, period_labels, time.perf_counter() - iteration_start), flush=True,)
+
+    if print_chain_progress:
+        sampling_seconds = time.perf_counter() - sampling_start
+        print(f"Gauss-Newton analysis took {gn_seconds_total:.1f} s of {sampling_seconds:.1f} s sampling ({100 * gn_seconds_total / sampling_seconds:.1f}%).", flush=True,)
+
     # ------------------------------------------------------------------
     # Remove burn-in and return
     # ------------------------------------------------------------------
@@ -718,6 +791,8 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
         kappa_x_trace_labels,
         tau_trace[burn:],
         tau_trace_labels,
+        gn_steps_trace[burn:],
+        gn_decrease_trace[burn:],
     )
 
 
@@ -760,6 +835,8 @@ class PostProcessInput:
     ningroup: int | None = None
     tau_trace: np.ndarray | None = None
     tau_trace_labels: list[str] | None = None
+    gn_steps_trace: np.ndarray | None = None
+    gn_decrease_trace: np.ndarray | None = None
     # Set only when the Gibbs sampler was run as several independent
     # chains (see multichain.run_chains); None for an ordinary,
     # single-chain run. When present, its contents are written into the
@@ -1106,6 +1183,10 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         data_vars["tau_trace"] = (["stepnum", "gtau"], config.tau_trace)
         coords["taugroup"] = ("gtau", config.tau_trace_labels)
 
+    if config.gn_steps_trace is not None:
+        data_vars["gn_steps_trace"] = (["stepnum", "period"], config.gn_steps_trace)
+        data_vars["gn_decrease_trace"] = (["stepnum", "period"], config.gn_decrease_trace)
+
     if config.nbc:
 
         Ymodbc = np.concatenate(list(Ymodbc_dic.values()))
@@ -1158,6 +1239,10 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     if config.tau_trace is not None:
         outds.tau_trace.attrs["longname"] = "trace for the AR(1)/OU same-site residual-correlation length"
         outds.tau_trace.attrs["units"] = "hours"
+
+    if config.gn_steps_trace is not None:
+        outds.gn_steps_trace.attrs["longname"] = "Gauss-Newton iterations used in each period's analysis update"
+        outds.gn_decrease_trace.attrs["longname"] = "predicted decrease in the analysis cost J (-2 log posterior) from one more Gauss-Newton step at each period's analysis mean"
 
     if config.nbc:
         outds.YmodBC.attrs["units"] = obs_units + " " + "mol/mol"
