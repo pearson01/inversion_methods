@@ -385,3 +385,123 @@ def test_iterative_analysis_update_cost_rule_reports_decrease_below_tolerance():
     assert converged
     assert 1 <= n_steps <= 10
     assert final_decrease < 0.1
+
+
+# ---------------------------------------------------------------------------
+# laplace_mean_correction / mean_correction flag
+# ---------------------------------------------------------------------------
+
+from inversion_methods.bristau.bristau_filter_sampler import laplace_mean_correction
+
+
+def _mixed_observation_problem(seed=7, nbasis=3, nbc=2, nr=2, ny=40):
+    """Lognormal x, normal (observed) BCs, lognormal r with zero H columns."""
+    rng = np.random.default_rng(seed)
+    nz = nbasis + nbc + nr
+    H = np.hstack([rng.uniform(0.1, 1.0, size=(ny, nbasis)),
+                   rng.uniform(0.5, 1.5, size=(ny, nbc)),
+                   np.zeros((ny, nr))])
+    r_inv = 1.0 / rng.uniform(0.5, 2.0, size=ny)
+    Y = H @ np.r_[np.exp(rng.normal(scale=0.4, size=nbasis)), rng.normal(1.0, 0.1, size=nbc), np.zeros(nr)] \
+        + rng.normal(scale=0.3, size=ny)
+    G = H.T @ (r_inv[:, None] * H)
+    g = H.T @ (r_inv * Y)
+    A = rng.normal(size=(nz, nz))
+    P = A @ A.T / nz + 0.05 * np.eye(nz)
+    u = rng.normal(scale=0.3, size=nz)
+    priors = dict(xprior={"pdf": "lognormal"}, bcprior={"pdf": "normal"}, rprior={"pdf": "lognormal"})
+    return u, P, G, g, priors, nbasis, nbc, nr
+
+
+def _observation_log_likelihood(u, G, g, nbasis, nbc, nr, priors):
+    z = u.copy()
+    if priors["xprior"]["pdf"] == "lognormal":
+        z[:nbasis] = np.exp(u[:nbasis])
+    if nbc and priors["bcprior"]["pdf"] == "lognormal":
+        z[nbasis:nbasis + nbc] = np.exp(u[nbasis:nbasis + nbc])
+    if priors["rprior"]["pdf"] == "lognormal":
+        z[-nr:] = np.exp(u[-nr:])
+    return g @ z - 0.5 * z @ G @ z
+
+
+def test_laplace_mean_correction_matches_finite_difference_third_derivatives():
+    """
+    0.5 * P @ c with c_j = sum_kl T_jkl P_kl, and c = grad_u tr(Hess(u) P).
+    Evaluate tr(Hess P) from second directional derivatives of the log
+    likelihood along P's eigenvectors, then differentiate it numerically.
+    Includes observed normal BC states, which add mixed third derivatives.
+    """
+    u, P, G, g, priors, nbasis, nbc, nr = _mixed_observation_problem()
+    lam, Q = np.linalg.eigh(P)
+
+    def trace_hess_P(uu, h=1e-3):
+        total = 0.0
+        for lm, q in zip(lam, Q.T):
+            f = lambda s: _observation_log_likelihood(uu + s * q, G, g, nbasis, nbc, nr, priors)
+            total += lm * (f(h) - 2 * f(0.0) + f(-h)) / h**2
+        return total
+
+    e = 1e-4
+    c_num = np.array([(trace_hess_P(u + e * ej) - trace_hess_P(u - e * ej)) / (2 * e) for ej in np.eye(u.size)])
+    expected = 0.5 * P @ c_num
+
+    shift = laplace_mean_correction(u, P, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr)
+
+    np.testing.assert_allclose(shift, expected, rtol=2e-3, atol=2e-5)
+
+
+def test_laplace_mean_correction_is_zero_for_all_normal_priors():
+    u, P, G, g, _, nbasis, nbc, nr = _mixed_observation_problem()
+    normal = {"pdf": "normal"}
+    shift = laplace_mean_correction(u, P, G, g, normal, normal, normal, nbasis, nbc, nr)
+    np.testing.assert_array_equal(shift, np.zeros_like(u))
+
+
+@pytest.mark.parametrize("posterior_sd", [0.1, 0.2, 0.3])
+def test_laplace_mean_correction_moves_scalar_mode_to_posterior_mean(posterior_sd):
+    """
+    One lognormal state observed directly with Gaussian errors (plus two
+    unobserved r states). The exact posterior of u is skewed, so the GN mode
+    sits above the mean; the corrected value must be much closer to the mean.
+    """
+    mu0, s0, x_obs = np.log(1.3), 0.58, 1.3
+    R = x_obs**2 / (1 / posterior_sd**2 - 1 / s0**2)
+    G = np.zeros((3, 3)); G[0, 0] = 1 / R
+    g = np.zeros(3); g[0] = x_obs / R
+    zf_mu = np.array([mu0, 0.0, 0.0]); Pf = np.diag([s0**2, 1.0, 1.0])
+    prior = {"pdf": "lognormal"}
+
+    za, Pa, *_ = iterative_analysis_update(zf_mu, zf_mu.copy(), G, g, Pf, prior, None, prior, 1, 0, 2,
+                                           max_inner_iters=50, tol=1e-12, stopping_rule="step")
+    corrected = za + laplace_mean_correction(za, Pa, G, g, prior, None, prior, 1, 0, 2)
+
+    grid = np.linspace(mu0 - 8 * s0, mu0 + 8 * s0, 200001)
+    logp = -0.5 * (grid - mu0)**2 / s0**2 - 0.5 * (x_obs - np.exp(grid))**2 / R
+    p = np.exp(logp - logp.max())
+    exact_mean = np.sum(grid * p) / np.sum(p)
+
+    assert za[0] > exact_mean                        # mode is above the mean
+    assert abs(corrected[0] - exact_mean) < 0.1 * abs(za[0] - exact_mean)
+    np.testing.assert_allclose(corrected[1:], za[1:])  # unobserved, independent r states untouched
+
+
+def test_mean_correction_flag_changes_filter_only_when_enabled():
+    off = iterative_augmented_mxkf(_make_amxkf_inputs_no_bc())
+    default = iterative_augmented_mxkf(_make_amxkf_inputs_no_bc())
+    on_inputs = _make_amxkf_inputs_no_bc(); on_inputs.mean_correction = True
+    on = iterative_augmented_mxkf(on_inputs)
+
+    np.testing.assert_array_equal(off.za_mu, default.za_mu)
+    assert not np.allclose(on.za_mu, off.za_mu)
+    # the correction moves the lognormal basis states down (mode above mean)
+    assert np.mean(on.za_mu[:, :3] - off.za_mu[:, :3]) < 0
+
+
+def test_mean_correction_flag_has_no_effect_with_normal_priors():
+    off_inputs = _make_amxkf_inputs_no_bc()
+    normal = {"pdf": "normal", "mu": 0.0, "sigma": 0.5}
+    off_inputs.xprior = normal; off_inputs.rprior = normal
+    on_inputs = _make_amxkf_inputs_no_bc()
+    on_inputs.xprior = normal; on_inputs.rprior = normal; on_inputs.mean_correction = True
+
+    np.testing.assert_allclose(iterative_augmented_mxkf(on_inputs).za_mu, iterative_augmented_mxkf(off_inputs).za_mu)

@@ -102,6 +102,15 @@ class InversionParameters:
     gn_tol: float | None = None
     gn_max_inner_iters: int = 10
 
+    # mean_correction (bool): False (default) passes each period's analysis
+    #               mode to the next forecast and the backward sampler. True
+    #               first shifts it towards the analysis mean with a
+    #               third-derivative (Laplace) correction, removing the upward
+    #               bias the mode has for lognormal states observed through a
+    #               linear operator with Gaussian errors. See
+    #               laplace_mean_correction in bristau_filter_sampler.py.
+    mean_correction: bool = False
+
     # --- Multi-chain convergence checking (see multichain.py) -----------
     # nchain (int): Number of independent copies of the Gibbs sampler to run.
     #               1 (the default) just runs the sampler once. Set to e.g. 4 to also get a
@@ -245,6 +254,7 @@ def bristau_function(config: InversionParameters):
         gn_stopping_rule=config.gn_stopping_rule,
         gn_tol=config.gn_tol,
         gn_max_inner_iters=config.gn_max_inner_iters,
+        mean_correction=config.mean_correction,
         )
 
     end_data = time.time()

@@ -76,6 +76,7 @@ class InversionInput:
     gn_stopping_rule: str = "cost"
     gn_tol: float | None = None
     gn_max_inner_iters: int = 10
+    mean_correction: bool = False
 
 
 def bristau_monthly_dictionaries(config: MessyInput) -> InversionInput:
@@ -638,6 +639,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
             gn_stopping_rule=config.gn_stopping_rule,
             gn_tol=config.gn_tol,
             gn_max_inner_iters=config.gn_max_inner_iters,
+            mean_correction=config.mean_correction,
         )
 
         sampler_inputs = iterative_augmented_mxkf(filter_inputs)

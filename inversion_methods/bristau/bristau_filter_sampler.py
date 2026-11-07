@@ -41,6 +41,7 @@ class amxkf_inputs:
     gn_stopping_rule: str = "cost"
     gn_tol: float | None = None
     gn_max_inner_iters: int = 10
+    mean_correction: bool = False
 
 
 @dataclass
@@ -655,6 +656,69 @@ def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, r
     return za_mu, Pa, Pf_chol, converged, n_steps, final_decrease
 
 
+def laplace_mean_correction(za_mu, Pa, G, g, xprior, bcprior, rprior, nbasis, nbc, nr):
+    """
+    Shift from the analysis mode towards the analysis mean, from the third
+    derivatives of the log posterior (first-order Laplace mean correction).
+
+    iterative_analysis_update returns the mode of the per-period analysis
+    density in optimisation space u. With lognormal blocks the observations
+    y = H z(u) + eps, z = exp(u), make that density skewed towards low u, so
+    its mean lies below the mode. Treating the mode as the mean (as the
+    forecast and the backward sampler do) biases lognormal states upwards.
+    To first order the mean is
+
+        E[u] ~ u_mode + 0.5 * Pa @ c,   c_j = sum_kl T_jkl Pa_kl,
+
+    where T is the third-derivative tensor of the log posterior at the mode.
+    The prior is Gaussian in u, so only the observation term contributes:
+    l(u) = g' z - 0.5 z' G z. Writing w = dz/du, v = d2z/du2 = d3z/du3
+    (w = v = exp(u) for lognormal states; w = 1, v = 0 for normal states)
+    and r = g - G z, the contraction is
+
+        c = v * r * diag(Pa) - 2 v * ((G * Pa) @ w) - w * (G @ (v * diag(Pa)))
+
+    It needs only the per-period Gram quantities G, g and the analysis
+    covariance, so like the analysis itself it does not depend on the number
+    of observations. For all-normal priors v = 0 and the shift is zero.
+
+    Parameters
+    ----------
+    za_mu : numpy.ndarray
+        Analysis mode in optimisation space.
+    Pa : numpy.ndarray
+        Analysis covariance at the mode.
+    G, g : numpy.ndarray
+        ``H' R^-1 H`` and ``H' R^-1 Y`` for this period.
+    xprior, bcprior, rprior : dict
+        Priors, used to find which blocks are lognormal.
+    nbasis, nbc, nr : int
+        Block sizes; nbc may be None or 0.
+
+    Returns
+    -------
+    numpy.ndarray
+        The shift, to be added to za_mu.
+    """
+    nbc = 0 if nbc is None else nbc
+
+    lognormal = np.zeros(za_mu.shape[0], dtype=bool)
+    lognormal[:nbasis] = xprior["pdf"] == "lognormal"
+    if nbc:
+        lognormal[nbasis:nbasis + nbc] = bcprior["pdf"] == "lognormal"
+    lognormal[-nr:] = rprior["pdf"] == "lognormal"
+
+    z = state_vector_mu_transform(za_mu, xprior, bcprior, rprior, nbasis, nbc, nr)
+    w = np.where(lognormal, z, 1.0)
+    v = np.where(lognormal, z, 0.0)
+    r = g - G @ z
+    dPa = np.diag(Pa)
+
+    c = v * r * dPa - 2.0 * v * ((G * Pa) @ w) - w * (G @ (v * dPa))
+
+    return 0.5 * Pa @ c
+
+
 def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
 
     nx = config.nbasis
@@ -741,6 +805,12 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
 
         (za_mu[t], Pa[t], Pf_chol[t],
          gn_converged[t], gn_steps[t], gn_decrease[t]) = iterative_analysis_update(zf_mu[t], za_mu_start, G_list[t], g_list[t], Pf[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr, max_inner_iters=config.gn_max_inner_iters, tol=config.gn_tol, analysis_form=config.analysis_form, stopping_rule=config.gn_stopping_rule)
+
+        # mean_correction=True: move the analysis from the mode towards the
+        # mean (see laplace_mean_correction) before it is used by the next
+        # forecast and by the backward sampler. Pa is left unchanged.
+        if config.mean_correction:
+            za_mu[t] = za_mu[t] + laplace_mean_correction(za_mu[t], Pa[t], G_list[t], g_list[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr)
 
         gn_seconds += time.perf_counter() - gn_start
 
