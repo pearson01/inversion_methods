@@ -76,8 +76,9 @@ class InversionInput:
     gn_stopping_rule: str = "cost"
     gn_tol: float | None = None
     gn_max_inner_iters: int = 10
+    # mean_correction: report post-hoc mean-corrected flux paths (see
+    # InversionParameters in bristau.py and augmented_backward_sampler).
     mean_correction: bool = False
-    mean_correction_max_sd: float | None = 0.7
 
 
 def bristau_monthly_dictionaries(config: MessyInput) -> InversionInput:
@@ -281,7 +282,9 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
     -------
     xtrace : ndarray
         Posterior samples for basis-function states. Shape:
-        (retained_iterations, nperiod, nbasis).
+        (retained_iterations, nperiod, nbasis). With config.mean_correction
+        these are the post-hoc mean-corrected samples (as are bctrace and
+        rtrace); the uncorrected ones are returned at the end of the tuple.
 
     bctrace : ndarray or None
         Posterior samples for boundary-condition states. Shape:
@@ -335,6 +338,13 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
         Predicted decrease in the analysis cost from one more Gauss-Newton
         step at each period's returned analysis mean. Shape:
         (retained_iterations, nperiod).
+
+    xtrace_uncorrected, bctrace_uncorrected, rtrace_uncorrected : ndarray or None
+        With config.mean_correction, the uncorrected samples (the paths that
+        drove the hyperparameter updates), shaped like xtrace, bctrace and
+        rtrace, for comparison with the corrected ones. None when
+        config.mean_correction is False (bctrace_uncorrected also when nbc
+        is 0).
     """
 
     # ------------------------------------------------------------------
@@ -489,6 +499,17 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
 
     gn_decrease_trace = np.zeros((config.iterations, config.nperiod), dtype=np.float32,)
 
+    # Uncorrected samples, kept only when the post-hoc mean correction is on
+    # (the traces above then hold the corrected samples). They are written to
+    # the output alongside the corrected ones to show the size of the
+    # correction.
+    if config.mean_correction:
+        xtrace_uncorrected = np.zeros_like(xtrace)
+        rtrace_uncorrected = np.zeros_like(rtrace)
+        bctrace_uncorrected = np.zeros_like(bctrace) if config.nbc else None
+    else:
+        xtrace_uncorrected = rtrace_uncorrected = bctrace_uncorrected = None
+
     gn_seconds_total = 0.0
     sampling_start = time.perf_counter()
 
@@ -641,7 +662,6 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
             gn_tol=config.gn_tol,
             gn_max_inner_iters=config.gn_max_inner_iters,
             mean_correction=config.mean_correction,
-            mean_correction_max_sd=config.mean_correction_max_sd,
         )
 
         sampler_inputs = iterative_augmented_mxkf(filter_inputs)
@@ -656,17 +676,30 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
         # Backward sampling
         # --------------------------------------------------------------
 
-        (zmusample, zsample, state_residuals) = (augmented_backward_sampler(sampler_inputs, rng=rng))
+        # zmusample, zsample and state_residuals are the uncorrected path and
+        # drive all the hyperparameter updates below. zsample_out is the path
+        # that is stored in the traces and reported: the post-hoc mean-corrected
+        # path if config.mean_correction is True, otherwise zsample itself (see
+        # augmented_backward_sampler).
+        (zmusample, zsample, state_residuals, zsample_out) = (augmented_backward_sampler(sampler_inputs, rng=rng))
 
         if print_chain_progress and i % 50 == 0:
-            print(f"        z sample: median: {np.median(zsample)}, mean: {np.mean(zsample)}, std: {np.std(zsample)}", flush=True,)
+            print(f"        z sample: median: {np.median(zsample_out)}, mean: {np.mean(zsample_out)}, std: {np.std(zsample_out)}", flush=True,)
 
-        xtrace[i] = zsample[:, :config.nbasis,]
+        xtrace[i] = zsample_out[:, :config.nbasis,]
 
         if config.nbc:
-            bctrace[i] = zsample[:, config.nbasis:-config.nr,]
+            bctrace[i] = zsample_out[:, config.nbasis:-config.nr,]
 
-        rtrace[i] = zsample[:, -config.nr:,]
+        rtrace[i] = zsample_out[:, -config.nr:,]
+
+        if config.mean_correction:
+            xtrace_uncorrected[i] = zsample[:, :config.nbasis,]
+
+            if config.nbc:
+                bctrace_uncorrected[i] = zsample[:, config.nbasis:-config.nr,]
+
+            rtrace_uncorrected[i] = zsample[:, -config.nr:,]
 
         # --------------------------------------------------------------
         # Update sigma2_exc
@@ -797,6 +830,11 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
         tau_trace_labels,
         gn_steps_trace[burn:],
         gn_decrease_trace[burn:],
+        # Uncorrected samples (None unless config.mean_correction). Appended at
+        # the end so the positions of the elements above are unchanged.
+        None if xtrace_uncorrected is None else xtrace_uncorrected[burn:],
+        None if bctrace_uncorrected is None else bctrace_uncorrected[burn:],
+        None if rtrace_uncorrected is None else rtrace_uncorrected[burn:],
     )
 
 
@@ -841,6 +879,13 @@ class PostProcessInput:
     tau_trace_labels: list[str] | None = None
     gn_steps_trace: np.ndarray | None = None
     gn_decrease_trace: np.ndarray | None = None
+    # Uncorrected samples, set only when the post-hoc mean correction was on
+    # (xtrace, bctrace and rtrace then hold the corrected samples). When set,
+    # they and the country totals computed from them are written to the
+    # output with an "_uncorrected" suffix.
+    xtrace_uncorrected: np.ndarray | None = None
+    bctrace_uncorrected: np.ndarray | None = None
+    rtrace_uncorrected: np.ndarray | None = None
     # Set only when the Gibbs sampler was run as several independent
     # chains (see multichain.run_chains); None for an ordinary,
     # single-chain run. When present, its contents are written into the
@@ -1013,6 +1058,12 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
       x_correlation:
         The exponential time constant representing the time at which the covariance 
         between period paramters is equal to 1/e. Units reflect the period chosen in x_freq.
+      xtrace_uncorrected, bctrace_uncorrected, rtrace_uncorrected:
+        Uncorrected samples, present only when the post-hoc mean correction was
+        on (all other outputs then come from the corrected samples). Written
+        out with the country totals computed from them, as *_uncorrected
+        variables, and the file attribute "mean_correction" records whether
+        the correction was on.
     Returns:
         xarray dataset containing results from inversion
 
@@ -1127,6 +1178,13 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         config.xtrace, apriori_flux, bfarray, cntrygrid, len(cntrynames), area, molarmass, unit_factor
     )
 
+    # Country totals from the uncorrected samples, for comparison with the
+    # (corrected) totals above when the post-hoc mean correction was on.
+    if config.xtrace_uncorrected is not None:
+        cntrymedian_unc, cntry68_unc, cntry95_unc, _ = country_totals(
+            config.xtrace_uncorrected, apriori_flux, bfarray, cntrygrid, len(cntrynames), area, molarmass, unit_factor
+        )
+
     Ymod = np.concatenate(list(Ymod_dic.values()))
 
     all_group_id = build_group_id_coordinate(config.nxout, config.nbasis, config.inner_group_id)
@@ -1191,6 +1249,17 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         data_vars["gn_steps_trace"] = (["stepnum", "period"], config.gn_steps_trace)
         data_vars["gn_decrease_trace"] = (["stepnum", "period"], config.gn_decrease_trace)
 
+    if config.xtrace_uncorrected is not None:
+        data_vars.update({
+            "xtrace_uncorrected": (["stepnum", "period", "bf"], config.xtrace_uncorrected),
+            "rtrace_uncorrected": (["stepnum", "period", "r"], config.rtrace_uncorrected),
+            "countrymedian_uncorrected": (["countrynames", "period"], cntrymedian_unc),
+            "country68_uncorrected": (["countrynames", "nUI", "period"], cntry68_unc),
+            "country95_uncorrected": (["countrynames", "nUI", "period"], cntry95_unc),
+        })
+        if config.nbc:
+            data_vars["bctrace_uncorrected"] = (["stepnum", "period", "bc"], config.bctrace_uncorrected)
+
     if config.nbc:
 
         Ymodbc = np.concatenate(list(Ymodbc_dic.values()))
@@ -1248,6 +1317,18 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         outds.gn_steps_trace.attrs["longname"] = "Gauss-Newton iterations used in each period's analysis update"
         outds.gn_decrease_trace.attrs["longname"] = "predicted decrease in the analysis cost J (-2 log posterior) from one more Gauss-Newton step at each period's analysis mean"
 
+    if config.xtrace_uncorrected is not None:
+        outds.countrymedian_uncorrected.attrs["units"] = country_units
+        outds.country68_uncorrected.attrs["units"] = country_units
+        outds.country95_uncorrected.attrs["units"] = country_units
+        outds.xtrace_uncorrected.attrs["longname"] = "scaling factor trace before the post-hoc mean correction"
+        outds.rtrace_uncorrected.attrs["longname"] = "state relaxation term trace before the post-hoc mean correction"
+        outds.countrymedian_uncorrected.attrs["longname"] = "median of ocean and country totals before the post-hoc mean correction"
+        outds.country68_uncorrected.attrs["longname"] = "68% HDI of ocean and country totals before the post-hoc mean correction"
+        outds.country95_uncorrected.attrs["longname"] = "95% HDI of ocean and country totals before the post-hoc mean correction"
+        if config.nbc:
+            outds.bctrace_uncorrected.attrs["longname"] = "boundary condition trace before the post-hoc mean correction"
+
     if config.nbc:
         outds.YmodBC.attrs["units"] = obs_units + " " + "mol/mol"
         outds.YaprioriBC.attrs["units"] = obs_units + " " + "mol/mol"
@@ -1259,6 +1340,9 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
         
     outds.attrs["Start date"] = config.start_date
     outds.attrs["End date"] = config.end_date
+    # Whether xtrace, rtrace, bctrace and everything derived from them
+    # (scaling, flux, Ymod, country totals) are post-hoc mean-corrected.
+    outds.attrs["mean_correction"] = str(config.xtrace_uncorrected is not None)
 
     # If this run used multiple chains (config.nchain > 1 in the ini file,
     # see multichain.py), record the convergence check's results as plain

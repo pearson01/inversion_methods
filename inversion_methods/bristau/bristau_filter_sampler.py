@@ -41,8 +41,10 @@ class amxkf_inputs:
     gn_stopping_rule: str = "cost"
     gn_tol: float | None = None
     gn_max_inner_iters: int = 10
+    # mean_correction: passed through to abs_inputs so that the backward
+    # sampler can return a mean-corrected copy of each sampled path (see
+    # augmented_backward_sampler). The forward filter itself is unchanged.
     mean_correction: bool = False
-    mean_correction_max_sd: float | None = 0.7
 
 
 @dataclass
@@ -71,6 +73,13 @@ class abs_inputs:
     gn_steps: np.ndarray | None = None
     gn_decrease: np.ndarray | None = None
     gn_seconds: float = 0.0
+    # Post-hoc mean correction (see augmented_backward_sampler). G_list and
+    # g_list are the per-period G_t = H_t' R_t^-1 H_t and g_t = H_t' R_t^-1 Y_t
+    # used by the forward filter's analysis; they are only needed when
+    # mean_correction is True.
+    mean_correction: bool = False
+    G_list: list | None = None
+    g_list: list | None = None
 
 
 
@@ -657,65 +666,56 @@ def iterative_analysis_update(zf_mu, za_mu_current, G, g, Pf, xprior, bcprior, r
     return za_mu, Pa, Pf_chol, converged, n_steps, final_decrease
 
 
-def laplace_mean_correction(za_mu, Pa, G, g, xprior, bcprior, rprior, nbasis, nbc, nr, max_sd=None):
+def laplace_third_derivative_term(za_mu, P, G, g, xprior, bcprior, rprior, nbasis, nbc, nr):
     """
-    Shift from the analysis mode towards the analysis mean, from the third
-    derivatives of the log posterior (first-order Laplace mean correction).
+    Third-derivative vector c of the Laplace (third-order) mean correction for
+    one period's observation term.
 
-    iterative_analysis_update returns the mode of the per-period analysis
-    density in optimisation space u. With lognormal blocks the observations
-    y = H z(u) + eps, z = exp(u), make that density skewed towards low u, so
-    its mean lies below the mode. Treating the mode as the mean (as the
-    forecast and the backward sampler do) biases lognormal states upwards.
-    To first order the mean is
+    The Gaussian approximations used by the filter and backward sampler are
+    centred on the mode in optimisation space u. With lognormal blocks the
+    observations y = H z(u) + eps, z = exp(u), make the posterior skewed
+    towards low u, so its mean lies below the mode, and treating the mode as
+    the mean biases lognormal states (and totals built from them) upwards.
+    The standard third-order Laplace result is
 
-        E[u] ~ u_mode + 0.5 * Pa @ c,   c_j = sum_kl T_jkl Pa_kl,
+        E[u] ~ u_mode + 0.5 * Sigma @ c,   c_j = sum_kl T_jkl Sigma_kl,
 
-    where T is the third-derivative tensor of the log posterior at the mode.
-    The prior is Gaussian in u, so only the observation term contributes:
+    where T is the third-derivative tensor of the log posterior at the mode and
+    Sigma the posterior covariance. The prior and transition are Gaussian in u,
+    so only the observation terms contribute to T. They are separable by
+    period, so c for period t only needs that period's covariance block
+    (augmented_backward_sampler passes the smoothed block S_t). For one period,
     l(u) = g' z - 0.5 z' G z. Writing w = dz/du, v = d2z/du2 = d3z/du3
-    (w = v = exp(u) for lognormal states; w = 1, v = 0 for normal states)
-    and r = g - G z, the contraction is
+    (w = v = exp(u) for lognormal states; w = 1, v = 0 for normal states) and
+    r = g - G z, the contraction is
 
-        c = v * r * diag(Pa) - 2 v * ((G * Pa) @ w) - w * (G @ (v * diag(Pa)))
+        c = v * r * diag(P) - 2 v * ((G * P) @ w) - w * (G @ (v * diag(P)))
 
-    It needs only the per-period Gram quantities G, g and the analysis
-    covariance, so like the analysis itself it does not depend on the number
-    of observations. For all-normal priors v = 0 and the shift is zero.
+    It needs only the per-period Gram quantities G, g and a covariance, so it
+    does not depend on the number of observations. For all-normal priors
+    v = 0 and c is zero.
 
     Parameters
     ----------
     za_mu : numpy.ndarray
-        Analysis mode in optimisation space.
-    Pa : numpy.ndarray
-        Analysis covariance at the mode.
+        Point at which the derivatives are evaluated (the period's analysis
+        mode), in optimisation space.
+    P : numpy.ndarray
+        Covariance block contracted with T (the smoothed covariance S_t in
+        augmented_backward_sampler).
     G, g : numpy.ndarray
         ``H' R^-1 H`` and ``H' R^-1 Y`` for this period.
     xprior, bcprior, rprior : dict
         Priors, used to find which blocks are lognormal.
     nbasis, nbc, nr : int
         Block sizes; nbc may be None or 0.
-    max_sd : float or None
-        If given, states whose analysis sd sqrt(Pa_ii) (log-space sd for
-        lognormal states) is not below max_sd are treated as having no skew:
-        they get no shift and keep the mode, and c is built with their rows
-        and columns of Pa removed, so they don't shift correlated narrow
-        states either. (Gating only the output, in the zero_jumps OSSE the
-        narrow r_in state collected a large drift from the wide x states and
-        collapsed from 0.34 to 0.02; zeroing only the wide states' own c
-        entries still let their variances leak in through the narrow states'
-        cross terms.) With no wide states this equals the ungated
-        correction. The expansion assumes the log posterior is close to quadratic
-        within about one sd of the mode. For wide states (log-sd ~2, e.g.
-        when sigma_qx is large) it overshoots the true mean shift several
-        times over, and through the sigma_qx update this can run away until
-        exp overflows. In the kappa05 identical-twin harness all states have
-        log-sd <= 0.58, so a gate of 0.7 leaves the result unchanged there.
 
     Returns
     -------
     numpy.ndarray
-        The shift, to be added to za_mu.
+        The vector c (length of za_mu). The mean shift is 0.5 * Sigma @ c,
+        with Sigma the covariance of the whole path (see
+        augmented_backward_sampler).
     """
     nbc = 0 if nbc is None else nbc
 
@@ -729,24 +729,9 @@ def laplace_mean_correction(za_mu, Pa, G, g, xprior, bcprior, rprior, nbasis, nb
     w = np.where(lognormal, z, 1.0)
     v = np.where(lognormal, z, 0.0)
     r = g - G @ z
-    dPa = np.diag(Pa)
+    dP = np.diag(P)
 
-    if max_sd is None:
-        c = v * r * dPa - 2.0 * v * ((G * Pa) @ w) - w * (G @ (v * dPa))
-        return 0.5 * Pa @ c
-
-    # Wide states contribute no third-order terms at all: c is built as if
-    # their variance were zero (wide rows/columns of Pa removed), so neither
-    # their own skew term nor their variances inside narrow states' terms
-    # (e.g. G_jk x_k Pa_kk) can shift anything, including the r states,
-    # which pool many cells. Wide states themselves keep the mode.
-    wide = np.sqrt(dPa) >= max_sd
-    Pn = np.where(wide[:, None] | wide[None, :], 0.0, Pa)
-    dPn = np.diag(Pn)
-    c = v * r * dPn - 2.0 * v * ((G * Pn) @ w) - w * (G @ (v * dPn))
-    delta = 0.5 * Pa @ np.where(wide, 0.0, c)
-
-    return np.where(wide, 0.0, delta)
+    return v * r * dP - 2.0 * v * ((G * P) @ w) - w * (G @ (v * dP))
 
 
 def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
@@ -836,11 +821,10 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
         (za_mu[t], Pa[t], Pf_chol[t],
          gn_converged[t], gn_steps[t], gn_decrease[t]) = iterative_analysis_update(zf_mu[t], za_mu_start, G_list[t], g_list[t], Pf[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr, max_inner_iters=config.gn_max_inner_iters, tol=config.gn_tol, analysis_form=config.analysis_form, stopping_rule=config.gn_stopping_rule)
 
-        # mean_correction=True: move the analysis from the mode towards the
-        # mean (see laplace_mean_correction) before it is used by the next
-        # forecast and by the backward sampler. Pa is left unchanged.
-        if config.mean_correction:
-            za_mu[t] = za_mu[t] + laplace_mean_correction(za_mu[t], Pa[t], G_list[t], g_list[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr, max_sd=config.mean_correction_max_sd)
+        # The filter always propagates the analysis mode. The mean correction
+        # (mean_correction=True) is applied afterwards, in
+        # augmented_backward_sampler, to a copy of the sampled path, so it never
+        # feeds back into the forecasts or into the hyperparameter updates.
 
         gn_seconds += time.perf_counter() - gn_start
 
@@ -875,6 +859,12 @@ def iterative_augmented_mxkf(config: amxkf_inputs) -> abs_inputs:
                          gn_steps=gn_steps,
                          gn_decrease=gn_decrease,
                          gn_seconds=gn_seconds,
+                         # Post-hoc mean correction: the per-period Gram
+                         # quantities used above (whitened if residual
+                         # whitening is on) are needed to build its c_t terms.
+                         mean_correction=config.mean_correction,
+                         G_list=G_list,
+                         g_list=g_list,
                          )
 
 
@@ -950,6 +940,47 @@ def augmented_backward_sampler(
         Reference-state persistence parameter. If absent, it defaults
         to zero.
 
+    mean_correction, G_list, g_list
+        If mean_correction is True, a mean-corrected copy of the sampled
+        path is also returned (see below). G_list and g_list must then hold
+        the per-period Gram quantities used by the forward filter.
+
+    Post-hoc mean correction
+    ------------------------
+    The sampled path is a draw from the Gaussian approximation N(m, Sigma)
+    to p(u_0:T | hyperparameters, y), centred on the (mode-based) smoothed
+    path m. For lognormal states the true posterior mean lies below the mode.
+    With mean_correction=True the third-order Laplace mean correction of the
+    whole path,
+
+        Delta = 0.5 * Sigma @ c,
+
+    is added to the sampled path, giving a draw from N(m + Delta, Sigma):
+    the same Gaussian, recentred on an estimate of the posterior mean. The
+    observation terms are separable by period, so c_t (see
+    laplace_third_derivative_term) needs only the smoothed covariance block
+
+        S_t = cov_t + A_t S_{t+1} A_t',   S_T = Pa_T,
+
+    which is accumulated in the backward loop below from quantities it
+    already computes (cov_t = Pa_t - A_t Pf_{t+1} A_t' is the conditional
+    covariance used for sampling). Sigma @ (0.5 c) is then obtained without
+    forming Sigma, by one linear forward pass and one linear backward pass
+    with the same gains (a Kalman filter/RTS smoother acting on the extra
+    linear terms 0.5 c_t):
+
+        forward:  Da_0 = 0.5 Pa_0 c_0,
+                  Da_t = Pa_t Pf_t^-1 F Da_{t-1} + 0.5 Pa_t c_t
+        backward: Ds_T = Da_T,
+                  Ds_t = Da_t + A_t (Ds_{t+1} - F Da_t)
+
+    The derivatives in c_t are evaluated at the filtered analysis modes.
+    The uncorrected path is still returned and is the one the Gibbs
+    hyperparameter updates should use: the correction changes only the
+    reported fluxes, so it cannot feed back into sigma_qx, kappa, sigma_exc or
+    tau. Updating sigma_qx from corrected paths biases it upwards and can run
+    away.
+
     Parameters
     ----------
     config : abs_inputs
@@ -962,13 +993,19 @@ def augmented_backward_sampler(
     Returns
     -------
     z_mu : ndarray
-        Sampled states in transformed or Gaussian space.
+        Sampled states in transformed or Gaussian space (uncorrected).
 
     z : ndarray
-        States after applying state_vector_mu_transform.
+        States after applying state_vector_mu_transform (uncorrected).
 
     state_residuals : ndarray
-        Residuals concatenated in chronological order.
+        Residuals of the uncorrected path, concatenated in chronological
+        order.
+
+    z_out : ndarray
+        States to report: the mean-corrected path after applying
+        state_vector_mu_transform if config.mean_correction is True,
+        otherwise the same array as z.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -1058,6 +1095,23 @@ def augmented_backward_sampler(
     residuals[-1] = (Y_dic[nperiod - 1] - Hz_dic[nperiod - 1] @ z[-1])
 
     # -------------------------------------------------------------
+    # Post-hoc mean correction set-up (see "Post-hoc mean correction"
+    # in the docstring). c holds c_t for every period; the RTS gains are
+    # kept for the linear backward pass. At the final period the smoothed
+    # covariance is the analysis covariance, S_T = Pa_T.
+    # -------------------------------------------------------------
+    mean_correction = bool(config.mean_correction)
+
+    if mean_correction:
+        if config.G_list is None or config.g_list is None:
+            raise ValueError("mean_correction=True needs G_list and g_list from the forward filter.")
+
+        c = np.empty_like(za_mu)
+        A_transpose_all = [None] * nperiod
+        S_next = Pa[-1]
+        c[-1] = laplace_third_derivative_term(za_mu[-1], S_next, config.G_list[-1], config.g_list[-1], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr)
+
+    # -------------------------------------------------------------
     # Backward simulation
     # -------------------------------------------------------------
     for t in range(nperiod - 2, -1, -1):
@@ -1132,6 +1186,20 @@ def augmented_backward_sampler(
         cov_t = _symmetrize_square(cov_t)
 
         # ---------------------------------------------------------
+        # Post-hoc mean correction: smoothed covariance
+        #
+        #     S_t = cov_t + A_t S_{t+1} A_t'
+        #
+        # (equal to the RTS form Pa_t + A_t (S_{t+1} - Pf_{t+1}) A_t')
+        # and this period's third-derivative vector c_t. The gain is
+        # kept for the linear backward pass after this loop.
+        # ---------------------------------------------------------
+        if mean_correction:
+            A_transpose_all[t] = A_transpose
+            S_next = _symmetrize_square(cov_t + A_transpose.T @ S_next @ A_transpose)
+            c[t] = laplace_third_derivative_term(za_mu[t], S_next, config.G_list[t], config.g_list[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr)
+
+        # ---------------------------------------------------------
         # Draw conditional state
         # ---------------------------------------------------------
         z_mu[t] = _sample_gaussian_cholesky(mean=mu_t, covariance=cov_t, rng=rng,)
@@ -1143,4 +1211,56 @@ def augmented_backward_sampler(
     # Preserve chronological ordering.
     state_residuals = np.concatenate(residuals)
 
-    return z_mu, z, state_residuals
+    if not mean_correction:
+        return z_mu, z, state_residuals, z
+
+    # -------------------------------------------------------------
+    # Post-hoc mean correction: Delta = 0.5 * Sigma @ c
+    #
+    # Linear forward pass (filter acting on the extra terms 0.5 c_t):
+    #
+    #     Da_0 = 0.5 Pa_0 c_0
+    #     Da_t = Pa_t Pf_t^-1 F Da_{t-1} + 0.5 Pa_t c_t
+    #
+    # F Da_t is stored for the backward pass. It uses the same
+    # structured transition as M1 above: x_out and x_in relax towards
+    # r_out and r_in, BCs persist, and r is scaled by kappa_r.
+    # -------------------------------------------------------------
+    Da = np.empty_like(za_mu)
+    F_Da = np.empty_like(za_mu)
+
+    for t in range(nperiod):
+        Da[t] = 0.5 * Pa[t] @ c[t]
+
+        if t > 0:
+            Da[t] += Pa[t] @ cho_solve((Pf_chol[t], True), F_Da[t - 1], check_finite=False)
+
+        F_Da[t] = Da[t]
+
+        if nxout > 0:
+            F_Da[t, ix_out] = kappa_out * Da[t, ix_out] + one_minus_kappa_out * Da[t, ir_out]
+
+        F_Da[t, ix_in] = kappa_in * Da[t, ix_in] + one_minus_kappa_in * Da[t, ir_in]
+        F_Da[t, ir] = kappa_r * Da[t, ir]
+
+    # -------------------------------------------------------------
+    # Linear backward pass (RTS smoother with the gains kept above):
+    #
+    #     Ds_T = Da_T
+    #     Ds_t = Da_t + A_t (Ds_{t+1} - F Da_t)
+    #
+    # Ds is the shift of the whole path. Adding it to the sampled path
+    # gives a draw from the mean-corrected Gaussian N(m + Ds, Sigma).
+    # -------------------------------------------------------------
+    Ds = np.empty_like(za_mu)
+    Ds[-1] = Da[-1]
+
+    for t in range(nperiod - 2, -1, -1):
+        Ds[t] = Da[t] + A_transpose_all[t].T @ (Ds[t + 1] - F_Da[t])
+
+    z_out = np.empty_like(z)
+
+    for t in range(nperiod):
+        z_out[t] = state_vector_mu_transform(z_mu[t] + Ds[t], config.xprior, config.bcprior, config.rprior, config.nbasis, config.nbc, config.nr)
+
+    return z_mu, z, state_residuals, z_out

@@ -150,12 +150,13 @@ def test_filter_and_backward_sampler_run_end_to_end_with_zero_boundary_condition
     inputs.nbc = 0  # int zero, not None -- see test_integration_gibbs.py for the nbc=None bug
     filtered = iterative_augmented_mxkf(inputs)
 
-    z_mu, z, residuals = augmented_backward_sampler(filtered, rng=np.random.default_rng(99))
+    z_mu, z, residuals, z_out = augmented_backward_sampler(filtered, rng=np.random.default_rng(99))
 
     assert z_mu.shape == (inputs.nperiod, inputs.nbasis + inputs.nr)
     assert np.all(np.isfinite(z_mu))
     assert np.all(np.isfinite(z))
     assert residuals.shape[0] == inputs.nperiod * 8
+    assert z_out is z  # mean_correction off: the reported path is the sampled path
 
 
 def _lognormal_problem_and_observations(seed=41, nbasis=5, nbc=0, nr=2, ny=30):
@@ -388,10 +389,10 @@ def test_iterative_analysis_update_cost_rule_reports_decrease_below_tolerance():
 
 
 # ---------------------------------------------------------------------------
-# laplace_mean_correction / mean_correction flag
+# laplace_third_derivative_term / post-hoc mean correction
 # ---------------------------------------------------------------------------
 
-from inversion_methods.bristau.bristau_filter_sampler import laplace_mean_correction
+from inversion_methods.bristau.bristau_filter_sampler import laplace_third_derivative_term
 
 
 def _mixed_observation_problem(seed=7, nbasis=3, nbc=2, nr=2, ny=40):
@@ -424,9 +425,9 @@ def _observation_log_likelihood(u, G, g, nbasis, nbc, nr, priors):
     return g @ z - 0.5 * z @ G @ z
 
 
-def test_laplace_mean_correction_matches_finite_difference_third_derivatives():
+def test_laplace_third_derivative_term_matches_finite_difference_third_derivatives():
     """
-    0.5 * P @ c with c_j = sum_kl T_jkl P_kl, and c = grad_u tr(Hess(u) P).
+    c_j = sum_kl T_jkl P_kl, and c = grad_u tr(Hess(u) P).
     Evaluate tr(Hess P) from second directional derivatives of the log
     likelihood along P's eigenvectors, then differentiate it numerically.
     Includes observed normal BC states, which add mixed third derivatives.
@@ -443,18 +444,17 @@ def test_laplace_mean_correction_matches_finite_difference_third_derivatives():
 
     e = 1e-4
     c_num = np.array([(trace_hess_P(u + e * ej) - trace_hess_P(u - e * ej)) / (2 * e) for ej in np.eye(u.size)])
-    expected = 0.5 * P @ c_num
 
-    shift = laplace_mean_correction(u, P, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr)
+    c = laplace_third_derivative_term(u, P, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr)
 
-    np.testing.assert_allclose(shift, expected, rtol=2e-3, atol=2e-5)
+    np.testing.assert_allclose(c, c_num, rtol=2e-3, atol=4e-5)
 
 
-def test_laplace_mean_correction_is_zero_for_all_normal_priors():
+def test_laplace_third_derivative_term_is_zero_for_all_normal_priors():
     u, P, G, g, _, nbasis, nbc, nr = _mixed_observation_problem()
     normal = {"pdf": "normal"}
-    shift = laplace_mean_correction(u, P, G, g, normal, normal, normal, nbasis, nbc, nr)
-    np.testing.assert_array_equal(shift, np.zeros_like(u))
+    c = laplace_third_derivative_term(u, P, G, g, normal, normal, normal, nbasis, nbc, nr)
+    np.testing.assert_array_equal(c, np.zeros_like(u))
 
 
 @pytest.mark.parametrize("posterior_sd", [0.1, 0.2, 0.3])
@@ -462,7 +462,7 @@ def test_laplace_mean_correction_moves_scalar_mode_to_posterior_mean(posterior_s
     """
     One lognormal state observed directly with Gaussian errors (plus two
     unobserved r states). The exact posterior of u is skewed, so the GN mode
-    sits above the mean; the corrected value must be much closer to the mean.
+    sits above the mean; mode + 0.5 * Pa @ c must be much closer to the mean.
     """
     mu0, s0, x_obs = np.log(1.3), 0.58, 1.3
     R = x_obs**2 / (1 / posterior_sd**2 - 1 / s0**2)
@@ -473,7 +473,7 @@ def test_laplace_mean_correction_moves_scalar_mode_to_posterior_mean(posterior_s
 
     za, Pa, *_ = iterative_analysis_update(zf_mu, zf_mu.copy(), G, g, Pf, prior, None, prior, 1, 0, 2,
                                            max_inner_iters=50, tol=1e-12, stopping_rule="step")
-    corrected = za + laplace_mean_correction(za, Pa, G, g, prior, None, prior, 1, 0, 2)
+    corrected = za + 0.5 * Pa @ laplace_third_derivative_term(za, Pa, G, g, prior, None, prior, 1, 0, 2)
 
     grid = np.linspace(mu0 - 8 * s0, mu0 + 8 * s0, 200001)
     logp = -0.5 * (grid - mu0)**2 / s0**2 - 0.5 * (x_obs - np.exp(grid))**2 / R
@@ -485,54 +485,87 @@ def test_laplace_mean_correction_moves_scalar_mode_to_posterior_mean(posterior_s
     np.testing.assert_allclose(corrected[1:], za[1:])  # unobserved, independent r states untouched
 
 
-def test_mean_correction_flag_changes_filter_only_when_enabled():
-    off = iterative_augmented_mxkf(_make_amxkf_inputs_no_bc())
-    default = iterative_augmented_mxkf(_make_amxkf_inputs_no_bc())
-    on_inputs = _make_amxkf_inputs_no_bc(); on_inputs.mean_correction = True
-    on = iterative_augmented_mxkf(on_inputs)
-
-    np.testing.assert_array_equal(off.za_mu, default.za_mu)
-    assert not np.allclose(on.za_mu, off.za_mu)
-    # the correction moves the lognormal basis states down (mode above mean)
-    assert np.mean(on.za_mu[:, :3] - off.za_mu[:, :3]) < 0
+def _filtered_with_and_without_mean_correction(nperiod=4):
+    off_inputs = _make_amxkf_inputs_no_bc(nperiod=nperiod)
+    on_inputs = _make_amxkf_inputs_no_bc(nperiod=nperiod); on_inputs.mean_correction = True
+    return iterative_augmented_mxkf(off_inputs), iterative_augmented_mxkf(on_inputs)
 
 
-def test_mean_correction_flag_has_no_effect_with_normal_priors():
-    off_inputs = _make_amxkf_inputs_no_bc()
+def test_mean_correction_leaves_filter_and_sampled_path_unchanged():
+    """The correction is post hoc: filter output and the sampled (hyperparameter-driving) path are identical."""
+    off, on = _filtered_with_and_without_mean_correction()
+
+    np.testing.assert_array_equal(on.za_mu, off.za_mu)
+    np.testing.assert_array_equal(on.Pa, off.Pa)
+
+    z_mu_off, z_off, res_off, z_out_off = augmented_backward_sampler(off, rng=np.random.default_rng(5))
+    z_mu_on, z_on, res_on, z_out_on = augmented_backward_sampler(on, rng=np.random.default_rng(5))
+
+    np.testing.assert_array_equal(z_mu_on, z_mu_off)
+    np.testing.assert_array_equal(z_on, z_off)
+    np.testing.assert_array_equal(res_on, res_off)
+    assert z_out_off is z_off
+    assert not np.allclose(z_out_on, z_on)
+
+
+def test_mean_correction_shift_is_deterministic_and_lowers_lognormal_states():
+    """The reported path is the sampled path plus a fixed shift (all states lognormal here)."""
+    _, on = _filtered_with_and_without_mean_correction()
+
+    shifts = []
+    for seed in (1, 2):
+        z_mu, _, _, z_out = augmented_backward_sampler(on, rng=np.random.default_rng(seed))
+        shifts.append(np.log(z_out) - z_mu)
+
+    np.testing.assert_allclose(shifts[0], shifts[1], rtol=1e-10, atol=1e-12)
+    assert np.mean(shifts[0][:, :on.nbasis]) < 0  # mode above mean for lognormal fluxes
+
+
+def test_mean_correction_shift_equals_half_joint_covariance_times_c():
+    """
+    The forward/backward linear passes must equal 0.5 * Sigma @ c, with Sigma
+    the covariance of the whole sampled path built here by brute force from a
+    dense transition matrix and the RTS recursions, and c_t from the smoothed
+    covariance blocks S_t = Sigma_tt.
+    """
+    _, on = _filtered_with_and_without_mean_correction(nperiod=5)
+    T, nz = on.za_mu.shape
+    F, _ = _naive_F_aug(on.nbasis, 0, on.nxout, on.nr, on.kappa_xout, on.kappa_xin, on.kappa_r, 0.0)
+
+    Pf = [L @ L.T for L in on.Pf_chol]
+    A = [on.Pa[t] @ F.T @ np.linalg.inv(Pf[t + 1]) for t in range(T - 1)]
+    S = [None] * T; S[-1] = on.Pa[-1]
+    for t in range(T - 2, -1, -1):
+        S[t] = on.Pa[t] + A[t] @ (S[t + 1] - Pf[t + 1]) @ A[t].T
+
+    # joint covariance: Sigma_tt = S_t, Sigma_ts = A_t Sigma_(t+1)s for t < s
+    Sigma = np.zeros((T * nz, T * nz))
+    blk = lambda t: slice(t * nz, (t + 1) * nz)
+    for s_ in range(T):
+        Sigma[blk(s_), blk(s_)] = S[s_]
+        for t in range(s_ - 1, -1, -1):
+            Sigma[blk(t), blk(s_)] = A[t] @ Sigma[blk(t + 1), blk(s_)]
+            Sigma[blk(s_), blk(t)] = Sigma[blk(t), blk(s_)].T
+
+    c = np.concatenate([laplace_third_derivative_term(on.za_mu[t], S[t], on.G_list[t], on.g_list[t], on.xprior, on.bcprior,
+                                                      on.rprior, on.nbasis, on.nbc, on.nr) for t in range(T)])
+    expected = (0.5 * Sigma @ c).reshape(T, nz)
+
+    z_mu, _, _, z_out = augmented_backward_sampler(on, rng=np.random.default_rng(3))
+    np.testing.assert_allclose(np.log(z_out) - z_mu, expected, rtol=1e-8, atol=1e-10)
+
+
+def test_mean_correction_has_no_effect_with_normal_priors():
+    inputs = _make_amxkf_inputs_no_bc()
     normal = {"pdf": "normal", "mu": 0.0, "sigma": 0.5}
-    off_inputs.xprior = normal; off_inputs.rprior = normal
-    on_inputs = _make_amxkf_inputs_no_bc()
-    on_inputs.xprior = normal; on_inputs.rprior = normal; on_inputs.mean_correction = True
+    inputs.xprior = normal; inputs.rprior = normal; inputs.mean_correction = True
 
-    np.testing.assert_allclose(iterative_augmented_mxkf(on_inputs).za_mu, iterative_augmented_mxkf(off_inputs).za_mu)
-
-
-def test_laplace_mean_correction_max_sd_gates_wide_states_only():
-    u, P, G, g, priors, nbasis, nbc, nr = _mixed_observation_problem()
-    full = laplace_mean_correction(u, P, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr)
-    sd = np.sqrt(np.diag(P))
-    thr = np.median(sd)
-    gated = laplace_mean_correction(u, P, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr, max_sd=thr)
-
-    narrow = sd < thr
-    assert narrow.any() and (~narrow).any()
-    # Gating = the ungated correction with the wide states' rows/columns of P
-    # removed: wide states keep the mode and contribute no third-order terms
-    Pn = np.where(narrow[:, None] & narrow[None, :], P, 0.0)
-    expected = laplace_mean_correction(u, Pn, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr)
-    np.testing.assert_allclose(gated, expected, rtol=1e-12, atol=1e-14)
-    np.testing.assert_array_equal(gated[~narrow], 0.0)
-    assert not np.allclose(gated[narrow], full[narrow])  # the wide states' terms were actually removed
-
-    wide_open = laplace_mean_correction(u, P, G, g, priors["xprior"], priors["bcprior"], priors["rprior"], nbasis, nbc, nr, max_sd=1e9)
-    np.testing.assert_array_equal(wide_open, full)
+    _, z, _, z_out = augmented_backward_sampler(iterative_augmented_mxkf(inputs), rng=np.random.default_rng(4))
+    np.testing.assert_allclose(z_out, z)
 
 
-def test_mean_correction_max_sd_is_passed_through_the_filter():
-    ungated = _make_amxkf_inputs_no_bc(); ungated.mean_correction = True; ungated.mean_correction_max_sd = None
-    closed = _make_amxkf_inputs_no_bc(); closed.mean_correction = True; closed.mean_correction_max_sd = 0.0
-    off = _make_amxkf_inputs_no_bc()
-
-    # a zero threshold gates every state, so the filter reduces to the plain mode filter
-    np.testing.assert_array_equal(iterative_augmented_mxkf(closed).za_mu, iterative_augmented_mxkf(off).za_mu)
-    assert not np.allclose(iterative_augmented_mxkf(ungated).za_mu, iterative_augmented_mxkf(off).za_mu)
+def test_mean_correction_needs_gram_lists():
+    _, on = _filtered_with_and_without_mean_correction()
+    on.G_list = None
+    with pytest.raises(ValueError):
+        augmented_backward_sampler(on, rng=np.random.default_rng(0))

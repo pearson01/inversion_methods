@@ -102,23 +102,17 @@ class InversionParameters:
     gn_tol: float | None = None
     gn_max_inner_iters: int = 10
 
-    # mean_correction (bool): False (default) passes each period's analysis
-    #               mode to the next forecast and the backward sampler. True
-    #               first shifts it towards the analysis mean with a
-    #               third-derivative (Laplace) correction, removing the upward
-    #               bias the mode has for lognormal states observed through a
-    #               linear operator with Gaussian errors. See
-    #               laplace_mean_correction in bristau_filter_sampler.py.
+    # mean_correction (bool): False (default) reports the sampled flux paths
+    #               as drawn. True reports each sampled path shifted by the
+    #               third-order (Laplace) mean correction of the whole path,
+    #               which removes the upward bias the posterior mode has for
+    #               lognormal states observed through a linear operator with
+    #               Gaussian errors. The correction is post hoc: the forward
+    #               filter and the hyperparameter updates still use the
+    #               uncorrected path, so it cannot feed back into sigma_qx,
+    #               kappa, sigma_exc or tau. See augmented_backward_sampler in
+    #               bristau_filter_sampler.py.
     mean_correction: bool = False
-
-    # mean_correction_max_sd (float | None): with mean_correction=True, only
-    #               states whose analysis sd (log-space sd for lognormal
-    #               states) is below this get the correction; wider states
-    #               keep the mode. The expansion behind the correction is only
-    #               valid for narrow posteriors and overshoots badly (and can
-    #               run away with sigma_qx) for log-sd ~2. None disables the
-    #               gate. Default 0.7.
-    mean_correction_max_sd: float | None = 0.7
 
     # --- Multi-chain convergence checking (see multichain.py) -----------
     # nchain (int): Number of independent copies of the Gibbs sampler to run.
@@ -264,7 +258,6 @@ def bristau_function(config: InversionParameters):
         gn_tol=config.gn_tol,
         gn_max_inner_iters=config.gn_max_inner_iters,
         mean_correction=config.mean_correction,
-        mean_correction_max_sd=config.mean_correction_max_sd,
         )
 
     end_data = time.time()
@@ -304,6 +297,9 @@ def bristau_function(config: InversionParameters):
     tau_trace_labels,
     gn_steps_trace,
     gn_decrease_trace,
+    xtrace_uncorrected,
+    bctrace_uncorrected,
+    rtrace_uncorrected,
     ) = gibbs_output
 
 
@@ -352,6 +348,10 @@ def bristau_function(config: InversionParameters):
                                           tau_trace_labels=tau_trace_labels,
                                           gn_steps_trace=gn_steps_trace,
                                           gn_decrease_trace=gn_decrease_trace,
+                                          # None unless the post-hoc mean correction was on
+                                          xtrace_uncorrected=xtrace_uncorrected,
+                                          bctrace_uncorrected=bctrace_uncorrected,
+                                          rtrace_uncorrected=rtrace_uncorrected,
                                           convergence_report=convergence_report,
                                           )
 

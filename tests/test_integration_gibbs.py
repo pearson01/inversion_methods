@@ -346,3 +346,24 @@ def test_gibbs_sampler_warm_start_matches_default_cold_start():
 
     assert np.all(np.isfinite(outputs_cold[0]))
     np.testing.assert_allclose(outputs_cold[0], outputs_warm[0], rtol=0.05)
+
+
+def test_gibbs_sampler_returns_uncorrected_traces_only_with_mean_correction():
+    """
+    With mean_correction the traces hold the post-hoc corrected samples and the
+    uncorrected ones are appended at the end of the output tuple; without it
+    the extra elements are None and the traces are unchanged.
+    """
+    off = augmented_ffbs_mxkf_gibbs_multi_slice(_make_inversion_input(), rng=np.random.default_rng(11))
+    on = augmented_ffbs_mxkf_gibbs_multi_slice(dataclasses.replace(_make_inversion_input(), mean_correction=True),
+                                               rng=np.random.default_rng(11))
+
+    assert off[12] is None and off[13] is None and off[14] is None
+
+    xtrace, rtrace, x_unc, r_unc = on[0], on[2], on[12], on[14]
+    assert x_unc.shape == xtrace.shape and r_unc.shape == rtrace.shape
+    # The correction is post hoc, so the uncorrected chain is the same chain as without it
+    np.testing.assert_array_equal(x_unc, off[0])
+    np.testing.assert_array_equal(r_unc, off[2])
+    np.testing.assert_array_equal(on[4], off[4])   # sigma2_qx trace unchanged
+    assert not np.allclose(xtrace, x_unc)
