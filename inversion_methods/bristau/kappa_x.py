@@ -124,6 +124,57 @@ def kappa_max(nperiod, c=2):
     return 1 - c/nperiod
 
 
+KAPPA_X_MINFOLD_STRINGS = ("annual",)
+
+
+def validate_kappa_x_minfold(minfold):
+    """
+    Check a kappa_x_minfold setting without needing nperiod, so a bad value
+    fails before data loading. Returns the value with strings normalised to
+    lower case.
+
+    Accepted: None (no upper bound beyond kappa < 1), a non-negative number,
+    or 'annual' (one e-fold per year of the inversion).
+    """
+    if minfold is None:
+        return None
+    if isinstance(minfold, str):
+        value = minfold.strip().lower()
+        if value not in KAPPA_X_MINFOLD_STRINGS:
+            raise ValueError(f"Unknown kappa_x_minfold {minfold!r}. Expected None, a number, or one of {list(KAPPA_X_MINFOLD_STRINGS)}.")
+        return value
+    if isinstance(minfold, (bool, np.bool_)) or not isinstance(minfold, (int, float, np.integer, np.floating)):
+        raise TypeError(f"kappa_x_minfold must be None, a number or one of {list(KAPPA_X_MINFOLD_STRINGS)}; got {minfold!r}.")
+    if not np.isfinite(minfold) or minfold < 0:
+        raise ValueError(f"kappa_x_minfold must be finite and non-negative; got {minfold!r}.")
+    return minfold
+
+
+def resolve_kappa_x_minfold(minfold, nperiod):
+    """
+    Number of e-folds used for kappa_max, or None for no bound.
+
+    'annual' gives nperiod / 12 (periods are calendar months), i.e. one
+    e-fold per year, so kappa_max = 1 - 1/12 whatever the inversion length.
+    Fractional years are kept, not rounded.
+    """
+    minfold = validate_kappa_x_minfold(minfold)
+    if minfold == "annual":
+        return nperiod / 12
+    return minfold
+
+
+def kappa_x_upper_bound(minfold, nperiod):
+    """
+    kappa_max for a kappa_x_minfold setting: 1 when minfold is None,
+    otherwise kappa_max(nperiod, resolved minfold).
+    """
+    resolved = resolve_kappa_x_minfold(minfold, nperiod)
+    if resolved is None:
+        return 1.0
+    return kappa_max(nperiod, resolved)
+
+
 def kappa_log_posterior(
     kappa_current,
     kappa_max,

@@ -251,3 +251,63 @@ def test_slice_sample_kappa_raises_on_nan_density_instead_of_hanging():
     from inversion_methods.bristau.kappa_x import slice_sample_kappa
     with pytest.raises(FloatingPointError):
         slice_sample_kappa(lambda k: np.nan, 0.5, 0.99, rng=np.random.default_rng(0))
+
+
+# ---------------------------------------------------------------------------
+# kappa_x_minfold: numbers, 'annual' and None
+# ---------------------------------------------------------------------------
+
+from inversion_methods.bristau.kappa_x import (  # noqa: E402
+    validate_kappa_x_minfold,
+    resolve_kappa_x_minfold,
+    kappa_x_upper_bound,
+)
+
+
+@pytest.mark.parametrize("minfold, nperiod, expected", [(10, 120, 1 - 10 / 120), (2, 24, 1 - 2 / 24), (10, 12, 1 - 10 / 12)])
+def test_kappa_x_upper_bound_numeric_matches_kappa_max(minfold, nperiod, expected):
+    assert kappa_x_upper_bound(minfold, nperiod) == pytest.approx(expected)
+    assert kappa_x_upper_bound(minfold, nperiod) == pytest.approx(kappa_max(nperiod, minfold))
+
+
+@pytest.mark.parametrize("nperiod", [6, 12, 18, 24, 120])
+@pytest.mark.parametrize("spelling", ["annual", "Annual", " ANNUAL "])
+def test_annual_minfold_is_years_and_gives_eleven_twelfths(nperiod, spelling):
+    assert resolve_kappa_x_minfold(spelling, nperiod) == pytest.approx(nperiod / 12)
+    assert kappa_x_upper_bound(spelling, nperiod) == pytest.approx(11 / 12)
+
+
+def test_annual_matches_ten_folds_over_ten_years():
+    assert kappa_x_upper_bound("annual", 120) == pytest.approx(kappa_x_upper_bound(10, 120))
+
+
+def test_none_minfold_gives_kappa_max_one():
+    assert resolve_kappa_x_minfold(None, 12) is None
+    assert kappa_x_upper_bound(None, 12) == 1.0
+
+
+@pytest.mark.parametrize("bad", ["yearly", "", "10"])
+def test_unknown_minfold_string_raises(bad):
+    with pytest.raises(ValueError):
+        validate_kappa_x_minfold(bad)
+
+
+@pytest.mark.parametrize("bad", [-1, float("nan"), float("inf")])
+def test_invalid_minfold_number_raises(bad):
+    with pytest.raises(ValueError):
+        validate_kappa_x_minfold(bad)
+
+
+@pytest.mark.parametrize("bad", [True, [10], {"a": 1}])
+def test_invalid_minfold_type_raises(bad):
+    with pytest.raises(TypeError):
+        validate_kappa_x_minfold(bad)
+
+
+def test_slice_sampler_stays_below_one_with_no_bound():
+    samples = _synthetic_ar1_samples(true_kappa=0.95, n_steps=200, n_series=20)
+    rng = np.random.default_rng(0)
+    kappa = 0.5
+    for _ in range(50):
+        kappa = sample_kappa(samples, np.full(20, 0.02**2), kappa, kappa_x_upper_bound(None, 200), 1.1, 1.1, 20, rng=rng)
+        assert 0.0 < kappa < 1.0

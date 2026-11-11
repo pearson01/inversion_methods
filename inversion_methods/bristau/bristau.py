@@ -5,6 +5,7 @@ from inversion_methods.bristau.siqma_qx import sigma_qx_groups
 from inversion_methods.bristau.data_bristau import DataConfig, extract_data, build_cntryds
 from inversion_methods.bristau.inversion_bristau import bristau_monthly_dictionaries, bristau_postprocessouts, MessyInput, PostProcessInput
 from inversion_methods.bristau.multichain import run_chains
+from inversion_methods.bristau.kappa_x import validate_kappa_x_minfold
 
 
 @dataclass
@@ -65,7 +66,7 @@ class InversionParameters:
     sigma_qx: str | float = "inner outer"
     sigma_qx_max: float | None = 0.5
     kappa_x: str | float | None = 0.0
-    kappa_x_minfold: int | None = 1
+    kappa_x_minfold: int | str | None = 1
     kappa_bc: None = None
     kappa_r: float | None = 0.0
     joint_kappa_sigma_qx: bool = True
@@ -145,7 +146,10 @@ class InversionParameters:
 
 
 def bristau_function(config: InversionParameters):
-    
+
+    # Fail on a bad kappa_x_minfold before the (slow) data loading.
+    validate_kappa_x_minfold(config.kappa_x_minfold)
+
     start_data = time.time()
 
     data_config = DataConfig(species=config.species, 
@@ -353,6 +357,8 @@ def bristau_function(config: InversionParameters):
                                           bctrace_uncorrected=bctrace_uncorrected,
                                           rtrace_uncorrected=rtrace_uncorrected,
                                           convergence_report=convergence_report,
+                                          kappa_x=config.kappa_x,
+                                          kappa_x_minfold=config.kappa_x_minfold,
                                           )
 
 

@@ -197,6 +197,20 @@ def convert_to_type(param_dict: dict) -> InversionParameters:
                 except (TypeError, ValueError):
                     value = raw_value
 
+        # Mixed int | str unions, for example kappa_x_minfold = 10 or 'annual'.
+        # Numbers stay numbers (int where exact), anything else stays a string.
+        elif str in union_types and int in union_types:
+            if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
+                value = raw_value
+            else:
+                try:
+                    value = int(raw_value)
+                except (TypeError, ValueError):
+                    try:
+                        value = float(raw_value)
+                    except (TypeError, ValueError):
+                        value = raw_value
+
         # Lists, dictionaries, strings and other values are assumed to
         # have already been handled correctly by extract_params().
         else:

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from inversion_methods.bristau.sigma_exc import update_sigma2_exc, sigma_exc_scheme_select, initialise_sigma2_exc
 from inversion_methods.bristau.siqma_qx import update_sigma2_qx, sigma_qx_scheme_select, initialise_sigma2_qx_vector, sigma_qx_trace_params, build_group_id_coordinate
-from inversion_methods.bristau.kappa_x import update_kappa_x, update_kappa_x_marginal, kappa_x_scheme_select, initialise_kappa_x_vector, kappa_x_trace_params, kappa_max
+from inversion_methods.bristau.kappa_x import update_kappa_x, update_kappa_x_marginal, kappa_x_scheme_select, initialise_kappa_x_vector, kappa_x_trace_params, kappa_x_upper_bound, resolve_kappa_x_minfold
 from inversion_methods.bristau.bristau_filter_sampler import iterative_augmented_mxkf, augmented_backward_sampler, amxkf_inputs
 from inversion_methods.bristau.tau_resid import tau_scheme_select, tau_trace_params, initialise_tau, update_tau_resid, prepare_tau_resid_indexing, whiten_observations, prepare_tau_sampler_inputs, sample_tau, match_numba_threads_to_blas
 
@@ -64,7 +64,7 @@ class InversionInput:
     sigma_qx: str | float = "inner outer"
     sigma_qx_max: float | None = 0.5
     kappa_x: str | float | None = 0.0
-    kappa_x_minfold: int | None = 1
+    kappa_x_minfold: int | str | None = 1
     kappa_bc: None = None
     kappa_r: float | None = 0.0
     joint_kappa_sigma_qx: bool = True
@@ -431,7 +431,7 @@ def augmented_ffbs_mxkf_gibbs_multi_slice(config: InversionInput, rng=None, prin
 
     if kappa_x_scheme != "fixed":
         kappa_x_aprior, kappa_x_bprior = prior_parser(config.kappa_x_prior)
-        kappa_x_max = kappa_max(config.nperiod, config.kappa_x_minfold)
+        kappa_x_max = kappa_x_upper_bound(config.kappa_x_minfold, config.nperiod)
 
     else:
         kappa_x_aprior = None
@@ -892,6 +892,10 @@ class PostProcessInput:
     # output file's attributes below so the convergence evidence travels
     # with the result rather than only appearing in a log.
     convergence_report: dict | None = None
+    # kappa_x setting and its kappa_x_minfold, recorded in the output
+    # attributes with the kappa_x upper bound they give.
+    kappa_x: str | float | None = None
+    kappa_x_minfold: int | str | None = None
 
 
 def select_period_flux(flux_da: xr.DataArray, period_starts) -> np.ndarray:
@@ -1343,6 +1347,12 @@ def bristau_postprocessouts(config: PostProcessInput) -> xr.Dataset:
     # Whether xtrace, rtrace, bctrace and everything derived from them
     # (scaling, flux, Ymod, country totals) are post-hoc mean-corrected.
     outds.attrs["mean_correction"] = str(config.xtrace_uncorrected is not None)
+    # kappa_x upper bound actually used (only meaningful when kappa_x is sampled).
+    if isinstance(config.kappa_x, str):
+        resolved_minfold = resolve_kappa_x_minfold(config.kappa_x_minfold, config.nperiod)
+        outds.attrs["kappa_x_minfold"] = str(config.kappa_x_minfold)
+        outds.attrs["kappa_x_minfold_resolved"] = "None" if resolved_minfold is None else float(resolved_minfold)
+        outds.attrs["kappa_x_max"] = float(kappa_x_upper_bound(config.kappa_x_minfold, config.nperiod))
 
     # If this run used multiple chains (config.nchain > 1 in the ini file,
     # see multichain.py), record the convergence check's results as plain
